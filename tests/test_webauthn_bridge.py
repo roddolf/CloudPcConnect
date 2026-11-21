@@ -22,7 +22,7 @@ from avd_feed_connect.gui import webauthn
 @pytest.fixture(scope="module", autouse=True)
 def application():
     # WebKit's sandboxed web process needs a registered application id.
-    app = Gtk.Application(application_id="io.github.shakeelosmani.avd_feed_connect.Test",
+    app = Gtk.Application(application_id="io.github.roddolf.CloudPcConnect.Test",
                           flags=Gio.ApplicationFlags.NON_UNIQUE)
     app.register(None)
     yield app

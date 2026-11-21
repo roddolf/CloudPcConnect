@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=AVD Feed + Connect Linux
-Comment=Sign in and connect to your Azure Virtual Desktop workspaces
+Name=Cloud PC Connect
+Comment=Connect to Windows 365 Cloud PCs, Dev Boxes and Azure Virtual Desktop
 Exec=avd-feed-connect %u
-Icon=io.github.shakeelosmani.avd_feed_connect
+Icon=io.github.roddolf.CloudPcConnect
 Terminal=false
 Categories=Network;RemoteAccess;GTK;
-Keywords=avd;rdp;remote;azure;virtual;desktop;windows;freerdp;
+Keywords=cloud;pc;devbox;windows365;avd;rdp;remote;azure;virtual;desktop;windows;freerdp;
 StartupNotify=true
 # Registers the app as the handler for the ms-appx-web sign-in redirect so the
 # browser can hand the final ?code=… URL straight back (see do_open); the %u on

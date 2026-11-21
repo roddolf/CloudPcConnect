@@ -1,33 +1,58 @@
 <p align="center">
-  <img src="assets/logo.png" width="120" alt="AVD Feed + Connect logo">
+  <img src="assets/logo.png" width="120" alt="Cloud PC Connect logo">
 </p>
 
-<h1 align="center">AVD Feed + Connect (Linux)</h1>
+<h1 align="center">Cloud PC Connect</h1>
 
 <p align="center">
-A native Linux client for <b>Azure Virtual Desktop</b> and <b>Windows 365</b> —
-sign in, see the desktops and remote apps you're entitled to (just like
-Microsoft's Windows App), and connect over RDP.
+A Linux client for <b>Windows 365 Cloud PCs</b>, <b>Microsoft Dev Box</b> and
+<b>Azure Virtual Desktop</b>, made for <a href="https://omarchy.org">Omarchy</a>
+and Hyprland. Sign in, see your Cloud PCs, desktops and remote apps, and connect
+over RDP.
 </p>
 
-> Unofficial. Not affiliated with or endorsed by Microsoft.
+> Unofficial. Not affiliated with or endorsed by Microsoft or Omarchy.
+
+This is a fork of [**AVD Feed + Connect**](https://github.com/shakeelosmani/avd_feed_connect)
+by Shakeel Osmani. The feed discovery, sign-in, bundled FreeRDP and most of the
+connection settings come from upstream; credit for that work goes there. The
+fork changes the parts that matter on an Omarchy desktop:
+
+- **Omarchy look.** The window follows the current Omarchy theme live: colors,
+  font, corner radius and light or dark mode change when you run
+  `omarchy theme set`. Other desktops get the upstream light and dark themes.
+- **Cloud PCs first.** Resources are grouped into Cloud PCs, virtual desktops
+  and apps, with text search and filters for type, region, workspace and app.
+- **Hyprland workspaces.** Each Cloud PC can open on a fixed Hyprland workspace,
+  and the main window can open on its own workspace. No window rules needed.
+- **App launcher entries.** Add a Cloud PC to the Omarchy app launcher with its
+  own picture. The icon always carries a small PC badge so you can tell it
+  opens a remote machine.
+- **Security keys.** FIDO2 keys (YubiKey and similar) work for Microsoft
+  sign-in inside the app and for Windows Hello sign-in inside the Cloud PC
+  (WebAuthn redirection), with PIN, touch and error feedback in the app.
+- **Cancellable sign-in.** In-app and browser sign-in can be cancelled, and the
+  connection reuses the account you are already signed in with.
+
+The app ID is `io.github.roddolf.CloudPcConnect`, so it installs next to
+upstream without sharing data or keyring entries.
 
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/workspaces.png" width="49%" alt="Workspace grid — light">
-  <img src="screenshots/workspaces-dark.png" width="49%" alt="Workspace grid — dark">
+  <img src="screenshots/omarchy-dark.png" width="49%" alt="Resources grouped into Cloud PCs, virtual desktops and apps (Omarchy dark theme)">
+  <img src="screenshots/omarchy-light-filter.png" width="49%" alt="Searching resources (Omarchy light theme)">
   <br>
-  <em>Your Azure Virtual Desktop workspaces after sign-in — light and dark
-  (switchable in-app, or follow the system). Example data shown.</em>
+  <em>Grouped resources with the filter bar, in a dark and a light Omarchy
+  theme. Example data.</em>
 </p>
 
 ## Why
 
-Linux has FreeRDP, but no client that does **feed discovery** — the step where
-you sign in and the client lists your AVD workspaces instead of you
-hand-authoring an `.rdp`/`.rdpw` file per host pool. This app adds that, and
-drives a bundled, hardened FreeRDP for the actual connection.
+Linux has FreeRDP, but no client that does **feed discovery**: you sign in and
+the client lists your Cloud PCs and Azure Virtual Desktop workspaces, instead of
+you writing an `.rdp` file per host pool. Upstream added that. This fork makes
+it fit a keyboard-driven tiling desktop.
 
 ## How it works
 
@@ -40,14 +65,109 @@ drives a bundled, hardened FreeRDP for the actual connection.
 4. **Connect** by downloading the resource's `.rdp` from the feed and launching
    the bundled `sdl-freerdp` with `/gateway:type:arm /sec:aad`. The
    connection's Entra token is obtained **silently** in the background (see
-   below) — no second sign-in window unless your org requires MFA at connect.
+   below), with no second sign-in window unless your org requires MFA at connect.
 
 Token refresh is the standard OAuth2 `refresh_token` grant (offline_access);
 the app renews the access token silently before it expires. The refresh token
-is stored in your **login keyring** (via libsecret), encrypted at rest — not in
+is stored in your **login keyring** (via libsecret), encrypted at rest, not in
 a plaintext file. The embedded sign-in keeps your Microsoft SSO session between
 launches, so re-authenticating (for example when a Conditional Access policy
 expires your token) is usually a single click rather than a full password+MFA.
+
+## Organizing resources
+
+The main window lists resources in three sections:
+
+1. **Cloud PCs**: Windows 365 Cloud PCs and Microsoft Dev Boxes.
+2. **Virtual desktops**: other Azure Virtual Desktop session desktops.
+3. **Apps**: RemoteApps, grouped under the workspace that publishes them.
+
+The search box matches resource names, workspaces, apps and regions. Press
+`/` or `Ctrl+F` to focus it and `Escape` to clear it. Next to it are filters
+for resource type, region, workspace and app. Each filter lists only the
+choices that still match the others. A filter only appears when the feed has
+more than one choice for it, and the last choices are remembered.
+
+The feed has no region field. The region is read from the resource and
+workspace names (for example "Productivity Apps - West Europe"), so resources
+without a region in their names have none. The region filter offers broad
+areas such as Europe, India or Asia Pacific, so "Asia Pacific" covers both
+"Asia" and "Southeast Asia".
+
+## Hyprland workspaces
+
+On Hyprland, right-click a Cloud PC or desktop tile and set **Open on
+workspace**. The session window moves to that workspace as soon as it appears,
+without stealing focus, and the app switches to the workspace once the
+connection has signed in. To stay where you are, turn off **Switch to a Cloud
+PC's workspace when it connects** in **Settings → Default settings…**. The same
+dialog has **Open this window on workspace** for the main window.
+
+The app talks to the Hyprland IPC socket directly. The Flatpak gets read-only
+access to `$XDG_RUNTIME_DIR/hypr` for that; nothing in your Hyprland config is
+changed. Each connection gets a unique window title, so placement only affects
+that session's windows.
+
+Keyboard shortcuts such as `Alt+Tab` are caught by Hyprland before they reach
+the session. To pass them to Windows, add a submap to
+`~/.config/hypr/bindings.lua` that is entered when a FreeRDP window
+(`com.freerdp.client.sdl3`) is focused. This stays in your Hyprland config
+because the app cannot change global bindings.
+
+## App launcher entries
+
+Right-click a Cloud PC or desktop tile and choose **Add…** under **App
+launcher**. The desktop portal asks you to confirm, and the entry then shows up
+in the Omarchy launcher (`Super+Space`). Choosing it opens the app if needed
+and connects.
+
+Use **Choose picture…** to give the entry your own image, or **Default
+picture** to go back to the resource's icon from the feed. Both keep a small PC badge in the
+corner, in the theme's accent color. **Remove** deletes the entry.
+
+Entries need the XDG desktop portal's DynamicLauncher interface (Omarchy has
+it through `xdg-desktop-portal-gtk`). Without it the controls are hidden.
+
+## Settings and backup
+
+All settings are plain JSON files in the app's data directory:
+
+```text
+~/.var/app/io.github.roddolf.CloudPcConnect/data/avd-feed-connect/
+├── settings.json                  app-wide settings
+├── accounts.json                  saved accounts and display names
+└── accounts/<account-id>/
+    ├── settings.json              per-resource settings
+    ├── launcher-icons/            pictures for launcher entries
+    ├── auth-modes.json            remembered sign-in method per resource
+    ├── workspaces.json            cached feed (rebuilt on refresh)
+    ├── icons/, feed/              cached icons and .rdp files
+    └── webview/                   Microsoft sign-in cookies (not settings)
+```
+
+Keys in the app-wide `settings.json`:
+
+| Key | Meaning |
+|---|---|
+| `_default` | Defaults for every resource (scale, monitors, certificate checks, and so on) |
+| `_filters` | Last search filter choices |
+| `_window_workspace` | Hyprland workspace for the main window, or `auto` |
+| `_follow_workspace` | Switch to a Cloud PC's workspace when it connects (`true`/`false`) |
+| `_theme`, `_language` | Appearance and language |
+| `_browser_signin` | Sign in with the system browser instead of in the app |
+| `_close_to_tray`, `_start_in_tray` | Tray behavior |
+| `_teams_redir`, `_teams_redir_camera` | Teams call optimization |
+
+The per-account `settings.json` maps a resource ID to its overrides. The
+fork adds `hypr_workspace` (`auto` or a workspace number), `launcher_icon` and
+`launcher_id`. Anything not set falls back to `_default`.
+
+The JSON files hold no secrets. Refresh tokens are in the keyring and sign-in
+cookies are in `webview/`. To back up or move your setup, copy the
+`avd-feed-connect` directory, leaving out `webview/` if you don't want to carry
+the sign-in session. To restore it, quit the app, copy the directory back and
+sign in again. Launcher entries belong to the desktop portal, so add them again
+on a new machine.
 
 ## Multiple work accounts
 
@@ -87,21 +207,21 @@ whole class of blank/second-window bugs the bundled FreeRDP webview could hit.
 The app puts an icon in the system tray. Right-click it for every resource,
 grouped by workspace (`●` = connected), each with a submenu:
 **Connect**, **Connect (windowed)** (a resizable window instead of full
-screen), or — for a running session — **Focus window** and **Disconnect**.
+screen), or, for a running session, **Focus window** and **Disconnect**.
 Left-click shows the main window. **Quit** from the tray menu exits.
 
 When you connect from the tray with the app hidden, there's a short quiet gap:
 after the Microsoft sign-in window (if one is needed) closes, the connection
 token is fetched in the background and the session starts with nothing on
-screen yet — the app stays in the tray and no window is shown until the remote
+screen yet. The app stays in the tray and no window is shown until the remote
 desktop itself appears. That pause is normal; it isn't stuck.
 
 Two options in the **Settings** (gear) menu, under **System tray** (both off by default,
 so closing the window still quits the app):
 
-- **Keep running in the tray when closed** — the window's close button hides it
+- **Keep running in the tray when closed**: the window's close button hides it
   to the tray; sessions and the sign-in refresh keep running.
-- **Start in the tray** — with a saved session, the app starts with only the
+- **Start in the tray**: with a saved session, the app starts with only the
   tray icon (handy for autostart). A first run still shows sign-in.
 
 The tray works wherever the desktop hosts StatusNotifierItem icons: KDE
@@ -122,70 +242,40 @@ blips and idle timeouts don't drop the session.
 
 It also includes the **PulseAudio hot-unplug + rdpsnd busy-loop fixes**
 ([FreeRDP#13334](https://github.com/FreeRDP/FreeRDP/pull/13334), now merged
-upstream) — without them, changing the audio device mid-call (e.g. plugging
+upstream). Without them, changing the audio device mid-call (e.g. plugging
 headphones during a Teams call) **freezes the whole session**.
 
 ## Install
 
-[![Latest release](https://img.shields.io/github/v/release/shakeelosmani/avd_feed_connect)](https://github.com/shakeelosmani/avd_feed_connect/releases/latest)
-
-**Easiest — one click / one command** (from the signed repo on GitHub Pages):
-
-👉 **[Install (avd_feed_connect.flatpakref)](https://shakeelosmani.github.io/avd_feed_connect/avd_feed_connect.flatpakref)**
-
-Opening that file installs the app through GNOME Software / your Flatpak handler.
-Or from a terminal:
+There are no prebuilt packages for this fork yet. Build and install the
+Flatpak from a checkout:
 
 ```bash
-flatpak install --user https://shakeelosmani.github.io/avd_feed_connect/avd_feed_connect.flatpakref
-flatpak run io.github.shakeelosmani.avd_feed_connect
-```
-
-This adds a small signed remote so the app also **updates** with
-`flatpak update`. The GNOME 51 runtime is pulled from Flathub automatically.
-
-**Alternative — single-file bundle** from the
-[latest release](https://github.com/shakeelosmani/avd_feed_connect/releases/latest):
-
-```bash
-flatpak install --user avd_feed_connect.flatpak
-```
-
-*(A Flathub listing is planned; until then, use either method above.)*
-
-### Build it yourself
-
-```bash
-flatpak install flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
+flatpak install --user flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
+git clone https://github.com/roddolf/CloudPcConnect.git
+cd CloudPcConnect
 flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
-  io.github.shakeelosmani.avd_feed_connect.yml
-flatpak run io.github.shakeelosmani.avd_feed_connect
+  io.github.roddolf.CloudPcConnect.yml
+flatpak run io.github.roddolf.CloudPcConnect
 ```
 
-> **Building your own code changes?** The manifest above pins the app module to a
-> published commit (a `type: git` source), so it builds the *released* code, not
-> your working tree — and the release workflow and the planned Flathub listing
-> both rely on it staying a pinned git source. To build local changes, copy the
-> manifest and point that one copy at the working tree instead of editing the
-> tracked file:
->
-> ```bash
-> cp io.github.shakeelosmani.avd_feed_connect.yml local.yml
-> ```
->
-> In `local.yml`, change only the last module's (`avd-feed-connect`) source from
-> the `type: git` / `url` / `commit` block to:
->
-> ```yaml
->     sources:
->       - type: dir
->         path: .
-> ```
->
-> then `flatpak run org.flatpak.Builder --user --install --force-clean build-dir local.yml`.
-> Keep the copy at the repo root (so the `patches/…` paths still resolve) and
-> don't commit it. For quick GUI/CLI iteration without a Flatpak rebuild, run it
-> unpackaged (below).
+The manifest builds the app from the working tree (a `type: dir` source), so
+local changes are picked up by the same command. The first build compiles
+FreeRDP, libfido2 and the Teams add-in and takes a while; later builds reuse
+the cache.
+
+**Coming from upstream AVD Feed + Connect?** The two apps keep separate data.
+To bring over accounts and per-resource settings, copy the data directory
+before the first launch:
+
+```bash
+mkdir -p ~/.var/app/io.github.roddolf.CloudPcConnect/data
+cp -r ~/.var/app/io.github.roddolf.CloudPcConnect/data/avd-feed-connect \
+  ~/.var/app/io.github.roddolf.CloudPcConnect/data/
+```
+
+Sign-in tokens live in the keyring of each Flatpak app and are not copied, so
+you sign in once in the new app.
 
 ## Run unpackaged (development)
 
@@ -205,7 +295,7 @@ with `AVD_SDL_FREERDP`.
 > against SDL 3.2.30. Running a locally built `sdl-freerdp` against a newer
 > distro SDL3 (e.g. Arch's 3.4.x) can make every fullscreen (`/f`) launch fail
 > with `Monitor configuration virtual desktop width must be 200 <= 0 <= 32766`
-> — SDL reports a 0×0 display. Build SDL 3.2.30 and install it where the app
+> because SDL reports a 0×0 display. Build SDL 3.2.30 and install it where the app
 > looks (`~/opt/sdl3`, or point `AVD_SDL_LIBS` at its `lib` dir):
 >
 > ```bash
@@ -221,22 +311,22 @@ with `AVD_SDL_FREERDP`.
 
 ### Connection tuning
 
-The session **auto-adapts to your machine** — it reads your display layout from
+The session **auto-adapts to your machine**. It reads your display layout from
 the compositor and sets the remote accordingly:
 
-- **Scale** follows your display's HiDPI factor — HiDPI (2×) → `200%`,
-  standard/ultrawide (1×) → `100%` — so text isn't tiny or huge.
-- **Multi-monitor** follows your actual monitor count — one monitor → single
+- **Scale** follows your display's HiDPI factor. HiDPI (2×) gives `200%`,
+  standard/ultrawide (1×) gives `100%`, so text isn't tiny or huge.
+- **Multi-monitor** follows your actual monitor count. One monitor gives single
   fullscreen; two or more → the remote spans them (`/multimon`).
 
-**Most people never need to touch this** — it auto-adapts. If you do want to
+**Most people never need to touch this**. If you do want to
 override it, the easiest way is right inside the app.
 
 #### In-app settings (no terminal, remembered per workspace)
 
 - **Per workspace:** right-click a workspace tile → set its **Display scale**,
   **Monitors** (single / all / automatic), **Server certificate**, **Session
-  authentication**, **Client shortcuts**, and any **Advanced flags** — plus, on a
+  authentication**, **Client shortcuts**, and any **Advanced flags**, plus, on a
   **RemoteApp** tile only, **Open RemoteApp as**. These are remembered per
   resource, so a RemoteApp and a full Desktop can differ.
 - **Defaults for everything:** the **Settings (gear) menu → Default settings…** sets the
@@ -244,15 +334,15 @@ override it, the easiest way is right inside the app.
   **Sign-in browser** identity.
 
 Precedence is: a workspace's own setting → your Default settings → automatic
-detection. (Environment variables, below, override even these — for scripting.)
+detection. (Environment variables, below, override even these, for scripting.)
 
 **Server certificate (verify / don't verify).** By default the app **verifies
 the session host's certificate**, pinning it on first connect (FreeRDP's
-trust-on-first-use) and refusing the session if that certificate later changes —
-protection against a man-in-the-middle. **If you can't connect** — a
+trust-on-first-use) and refusing the session if that certificate later changes,
+which protects against a man-in-the-middle. **If you can't connect** with a
 "certificate changed" / verification error, common on **pooled** host pools
 whose session hosts present different certificates each time, or after a host is
-rebuilt — set **Server certificate → Don't verify** for that workspace (or in
+rebuilt, set **Server certificate → Don't verify** for that workspace (or in
 Default settings). That restores the old behaviour of accepting any certificate.
 Leave it on **Verify** whenever you can; only turn it off if it's actually
 blocking you. (Scripting override: `AVD_CERT=ignore` or `AVD_CERT=verify`.)
@@ -260,7 +350,7 @@ blocking you. (Scripting override: `AVD_CERT=ignore` or `AVD_CERT=verify`.)
 **Open RemoteApp as (app window / full desktop).** A **RemoteApp** tile is a
 single published app (e.g. a line-of-business tool) rather than a full desktop.
 The bundled SDL client's RemoteApp/RAIL window integration is limited and the app
-window may never appear — the session connects, shows "Loading", and then looks
+window may never appear. The session connects, shows "Loading", and then looks
 stuck or drops. If that happens, right-click that tile → **Settings** → set
 **Open RemoteApp as → Full desktop**. The app then connects to the host's
 **whole desktop** so you can launch the published app from inside it, the way a
@@ -280,7 +370,7 @@ intact so AVD can broker the host. It applies to that one RemoteApp tile only, i
 > **Backend requirement.** This only works if the RemoteApp's host pool /
 > application group will actually hand out a **full desktop** session to your
 > account. Many AVD deployments publish an app group as RemoteApp-only and do not
-> grant desktop access on the same hosts — there the full-desktop request is
+> grant desktop access on the same hosts. There the full-desktop request is
 > refused and you will not connect. If you can't log in after switching, the host
 > isn't offering a desktop and this toggle can't help; you'd need the admin to
 > grant desktop access (or a RAIL-capable client).
@@ -290,7 +380,7 @@ intact so AVD can broker the host. It applies to that one RemoteApp tile only, i
 **Client shortcuts (Right Shift + key).** The bundled SDL client reserves
 Right Shift + key for its own shortcuts (D disconnects, Enter toggles
 fullscreen, R resizable, G keyboard grab, M minimize), so those keys never reach
-the remote desktop — and if Right Shift is seen as held (e.g. a stuck modifier
+the remote desktop, and if Right Shift is seen as held (e.g. a stuck modifier
 under XWayland), an ordinary Ctrl+D can end the session. Set **Client
 shortcuts → Disabled** to pass every key through. The choice is written to
 FreeRDP's own `~/.config/freerdp/sdl-freerdp.json` (`SDL_KeyModMask`) on each
@@ -300,43 +390,43 @@ connect; **Automatic** leaves that file untouched.
 tenants have a Conditional Access policy that only lets you sign in from a
 **Windows device** or **Microsoft Edge**, and it decides that from the browser
 identity (User-Agent) the sign-in sends. The built-in sign-in window is Linux
-WebKit, so such a tenant blocks it — the same wall you hit in a web browser
+WebKit, so such a tenant blocks it, the same wall you hit in a web browser
 until you install a "User-Agent switcher" extension. This setting is that
 switch, built in: in **⋯ menu → Default settings…** set **Sign-in browser** to
 **Microsoft Edge on Windows** (or **Google Chrome on Windows**) and every
 sign-in window presents that identity instead, which is enough to satisfy those
 policies. **Custom…** lets you paste any User-Agent string verbatim.
 
-Leave it on **Automatic** unless a sign-in is actually being blocked —
+Leave it on **Automatic** unless a sign-in is actually being blocked.
 **Automatic** is the normal Linux identity and is what everyone who isn't behind
 such a policy should keep.
 
 It is a single, **account-wide** choice (so it lives in Default settings, not on
 individual workspaces): the first account sign-in and every connection share one
-signed-in session, so they must all present the **same** identity — if they
+signed-in session, so they must all present the **same** identity. If they
 differed, Microsoft would see an inconsistent device for that session and refuse
-to connect. The setting changes only the sign-in window's identity — not the
-remote session — and takes effect on your next sign-in.
+to connect. The setting changes only the sign-in window's identity, not the
+remote session, and takes effect on your next sign-in.
 
 **Open a downloaded .rdp (if your tenant blocks the feed on Linux entirely).**
-Some hardened tenants — many US Government / DoD ones — have a Conditional
+Some hardened tenants, many US Government / DoD ones, have a Conditional
 Access policy that refuses an unmanaged Linux device a token for the **workspace
 feed** at all, so the app can't discover your desktops no matter how you sign in.
 If you can still download a `.rdp`/`.rdpw` from the AVD web client
 (`https://client.wvd.azure.us/arm/webclient/` on Gov, or the commercial
 equivalent), the app can connect that file directly: **⋯ menu → Open a
 downloaded .rdp…** (also offered on the sign-in screen). It appears as a tile
-under a **Local .rdp files** account and connects with the normal flow — the
+under a **Local .rdp files** account and connects with the normal flow. The
 connection's own sign-in opens in your **system browser** so a smart card / CAC
 or certificate can be presented (the built-in window can't). For a downloaded
 `.rdp` you finish in the browser and **paste the final address back** into the
 app; the app waits for that paste, so there's no race. (The automatic, no-paste
 hand-back described under *smart card / CAC* below is for **feed** sign-in and
-feed-discovered connections — a local `.rdp` keeps the paste step, because it
+feed-discovered connections. A local `.rdp` keeps the paste step, because it
 carries its own connection details rather than a feed token.) New tiles default
 to `/smartcard` in **Advanced flags**; edit them per tile.
 
-This works because only the *feed* token is blocked for these tenants — the
+This works because only the *feed* token is blocked for these tenants. The
 per-connection sign-in is allowed, which is exactly what the manual
 `xfreerdp3 … /azure:… /smartcard` workaround relies on. Set `AVD_CLOUD=usgov`
 (see below) so the connection targets the Gov Entra endpoints. If your tenant
@@ -347,22 +437,22 @@ per-connection sign-in is allowed, which is exactly what the manual
 so the workspace feed, the sign-in authority, and the connection-time token all
 target that cloud's endpoints as one matched set:
 
-- `AVD_CLOUD=usgov` — Azure Government (US Gov; GCC High and DoD share these
+- `AVD_CLOUD=usgov`: Azure Government (US Gov; GCC High and DoD share these
   endpoints: feed `rdweb.wvd.azure.us`, Entra `login.microsoftonline.us`)
-- `AVD_CLOUD=china` — Azure China, operated by 21Vianet (feed
+- `AVD_CLOUD=china`: Azure China, operated by 21Vianet (feed
   `rdweb.wvd.azure.cn`, Entra `login.partner.microsoftonline.cn`)
-- `AVD_CLOUD=commercial` — the default; no need to set it
+- `AVD_CLOUD=commercial`: the default; no need to set it
 
 Set it like the other variables: `flatpak override --user
---env=AVD_CLOUD=usgov io.github.shakeelosmani.avd_feed_connect`, or export it
+--env=AVD_CLOUD=usgov io.github.roddolf.CloudPcConnect`, or export it
 before launching. It is one choice for the whole app. (The public Remote Desktop
 client's sign-in redirect stays on its registered commercial host even on a
-sovereign cloud — that is expected, and is the combination that actually
+sovereign cloud. That is expected, and is the combination that actually
 connects a Gov AVD from Linux.)
 
 **Signing in with a smart card / CAC / PIV (certificate-based auth).** The
 built-in sign-in window is Linux WebKit, which has no PKCS#11 bridge and so
-**cannot present a client certificate** — a tenant that enforces
+**cannot present a client certificate**, so a tenant that enforces
 certificate-based auth (CBA) fails before the card is ever read. Sign in through
 your **real browser** instead, which already talks to the reader: on the sign-in
 screen click **Sign in with a browser instead** (under the main button). The app
@@ -370,7 +460,7 @@ opens your system browser, you authenticate with the card there, and it captures
 the result on a local redirect; this also covers the connection-time sign-in, so
 a CAC/PIV sign-in works end to end.
 
-The choice is **sticky and account-wide** — once on, every sign-in and re-auth
+The choice is **sticky and account-wide**. Once on, every sign-in and re-auth
 uses the browser, because a tenant that needs a card needs it every time. To turn
 it back off (say, on a commercial account that doesn't need it), **⋯ menu →
 Default settings…** and uncheck **Use the system browser to sign in**; sign-in
@@ -382,11 +472,11 @@ it uses a loopback redirect (`http://localhost:…`) and the browser lands on a
 "you can close this tab" page. On a **sovereign cloud** that loopback isn't
 registered for the sign-in client (every US Gov CAC sign-in otherwise fails with
 `AADSTS50011`), so the app instead registers an OS handler for the broker
-redirect and the browser hands the result straight back — your browser will ask
+redirect and the browser hands the result straight back. Your browser will ask
 once to **"Open avd_feed_connect?"**; allow it and the app captures the sign-in
 with no copy/paste. One cosmetic quirk on that path: the browser tab is left
 **spinning with no completion page** (the final redirect is an app handoff, not
-a web page). That's expected — the app shows a "you can close the browser tab"
+a web page). That's expected. The app shows a "you can close the browser tab"
 notice once you're signed in. If the handoff doesn't fire (no handler
 registered), use **Paste the address instead** in the sign-in window as a
 fallback.
@@ -401,7 +491,7 @@ prompt and spinning-tab-then-"you can close it" behaviour as the feed; the paste
 field stays as a fallback. (Confirmed end to end on a US Gov tenant with a CAC.)
 `AVD_SCHEME_SIGNIN=1` forces both the feed and the connection broker-redirect
 capture on **commercial** too (useful if a firewall blocks the loopback port, or
-to test the chain) — on sovereign clouds it's already the default.
+to test the chain). On sovereign clouds it's already the default.
 
 **Resizable window (dynamic resolution):** by default the session opens
 fullscreen. If you'd rather have a resizable window whose remote resolution
@@ -410,7 +500,7 @@ workspace's **Advanced flags**. The session then starts windowed (toggle
 fullscreen any time with Ctrl+Shift+Enter). Fullscreen and `/dynamic-resolution`
 can't be combined, so the app only forces fullscreen when this flag isn't set;
 it also clears the feed's smart-sizing property, which would otherwise conflict.
-Dynamic resolution runs on a **single monitor** — when it's set, the app ignores
+Dynamic resolution runs on a **single monitor**. When it's set, the app ignores
 multi-monitor selection for that session (leave it off to span monitors).
 
 **Advanced flags reference.** The **Advanced flags** field takes raw
@@ -422,7 +512,7 @@ accepts works; these are the ones people reach for most:
 | `/dynamic-resolution` | Open a resizable window; the remote resolution follows the window instead of a fixed fullscreen size (see above). |
 | `/d:AzureAD` | Override the NLA logon domain (the app sends an empty domain by default; a few host pools want `AzureAD` or an on-prem domain instead). |
 | `/multimon` / `-multimon` | Force multi-monitor on / off, overriding the automatic monitor-count choice. Same as the **Monitors** setting. |
-| `/gfx` | Force the GFX (RemoteFX/H.264) graphics pipeline — smoother video on capable host pools. |
+| `/gfx` | Force the GFX (RemoteFX/H.264) graphics pipeline, for smoother video on capable host pools. |
 | `/network:auto` | Let FreeRDP auto-detect the link and tune codecs/latency for it. |
 | `-themes` / `-wallpaper` | Drop remote desktop themes / wallpaper to save bandwidth on slow links. |
 
@@ -430,7 +520,7 @@ Flags set here take precedence over the app's automatic choices, and
 `AVD_EXTRA_ARGS` (below) is appended after them for scripting.
 
 **How to enter them.** Type the flags into the **Advanced flags** field exactly
-as you would on a command line — **separated by spaces**, and you can combine as
+as you would on a command line, **separated by spaces**, and you can combine as
 many as you like. Flags that take a value use a colon, with no space around it.
 Examples (each line is what you'd put in the field):
 
@@ -442,7 +532,7 @@ Resizable window, remote follows the window size.
 ```
 /dynamic-resolution /gfx
 ```
-Resizable window **and** the H.264 graphics pipeline — two flags, space-separated.
+Resizable window **and** the H.264 graphics pipeline. Two flags, space-separated.
 
 ```
 /d:AzureAD
@@ -454,7 +544,7 @@ default).
 /dynamic-resolution /gfx -wallpaper -themes
 ```
 A slow-link profile: resizable window, GFX codec, and strip the remote wallpaper
-and themes to save bandwidth — four flags at once.
+and themes to save bandwidth. Four flags at once.
 
 If a value ever contains a space, quote it like on a shell (e.g.
 `/drive:home,"/my folder"`); the field is parsed with the same rules.
@@ -463,12 +553,12 @@ If a value ever contains a space, quote it like on a shell (e.g.
 
 These are for power users / scripting and win over the in-app settings. Set them
 graphically (no terminal) with [**Flatseal**](https://flathub.org/apps/com.github.tchx84.Flatseal):
-install it from your software center (search "Flatseal"), pick **AVD Feed +
-Connect Linux**, open the **Environment** section, and add a line like
+install it from your software center (search "Flatseal"), pick **Cloud PC
+Connect**, open the **Environment** section, and add a line like
 `AVD_SCALE=150`. Or from a terminal:
 
 ```bash
-flatpak override --user --env=AVD_SCALE=150 io.github.shakeelosmani.avd_feed_connect
+flatpak override --user --env=AVD_SCALE=150 io.github.roddolf.CloudPcConnect
 ```
 
 Both methods write the same setting.
@@ -485,12 +575,12 @@ Both methods write the same setting.
 | `AVD_TRAY` | `0`/`off` disables the tray icon (closing the window then always quits). |
 | `AVD_CLOUD` | Target a Microsoft sovereign cloud: `usgov` (Azure Government), `china` (21Vianet), or `commercial` (default). Switches the feed, sign-in, and token endpoints for the whole app as one set. |
 | `AVD_BROWSER_SIGNIN` | Force system-browser sign-in on (`1`/`on`) or off (`0`/`off`), overriding the **Use the system browser to sign in** toggle. Needed for smart card / certificate (CBA) tenants. |
-| `AVD_SCHEME_SIGNIN` | On **sovereign clouds** both the *feed* and the *connection-time* sign-in already capture via the broker-redirect OS handler with no copy/paste; this flag is not needed there. `1`/`on` forces that same no-paste capture on **commercial** (both legs) — useful if a firewall blocks the loopback port, or to test the chain. For the connection leg the app hands FreeRDP the token it already holds (skipping the gateway prompt) and auto-catches the session-host redirect. |
+| `AVD_SCHEME_SIGNIN` | On **sovereign clouds** both the *feed* and the *connection-time* sign-in already capture via the broker-redirect OS handler with no copy/paste; this flag is not needed there. `1`/`on` forces that same no-paste capture on **commercial** (both legs). Useful if a firewall blocks the loopback port, or to test the chain. For the connection leg the app hands FreeRDP the token it already holds (skipping the gateway prompt) and auto-catches the session-host redirect. |
 
 Connections are launched over X11/XWayland (`GDK_BACKEND=x11`) because FreeRDP's
 SDL client is unstable on native Wayland; this is automatic.
 
-## Signing in — and why you might be asked again
+## Signing in, and why you might be asked again
 
 The app keeps you signed in the way the Windows App does: your workspaces (and
 their icons) are saved and shown instantly on launch, and the access token is
@@ -502,7 +592,7 @@ that is your organization's **Conditional Access sign-in frequency** policy,
 not the app. The tell-tales are the status bar ("your organization requires
 signing in again (Conditional Access sign-in frequency)") and, in a terminal,
 `token refresh failed … AADSTS70043 … maximum allowed lifetime for this request
-is 300` — Entra refuses to renew the Azure Virtual Desktop token unless you
+is 300`. Entra refuses to renew the Azure Virtual Desktop token unless you
 signed in within the last *N* minutes (300 s is the "Every time" setting). No
 client can renew silently under that rule; the official clients usually avoid
 the prompt only because the policy excludes managed/compliant devices, which a
@@ -512,7 +602,7 @@ Entra → Sign-in logs.
 The app makes that as painless as it can: the saved workspaces stay on screen,
 and because your Microsoft SSO session is remembered between launches, the
 re-auth is usually a **single click** on your account (no password re-entry)
-rather than a full password+MFA — unless the policy is strict enough to demand
+rather than a full password+MFA, unless the policy is strict enough to demand
 fresh credentials. The workspace you double-clicked then connects on its own
 once you're back in.
 
@@ -523,12 +613,12 @@ Some AVD host pools aren't set up for **Microsoft Entra ID RDP authentication**
 with **NLA** instead of the token flow: it passes your account as the username
 and an **empty domain**, and FreeRDP prompts you for your password each time you
 connect (it isn't stored). Your Entra sign-in is still used for the feed and the
-gateway — the password is only for the session-host logon.
+gateway. The password is only for the session-host logon.
 
 - **Hybrid (Active Directory) joined** hosts work this way with your normal
   domain password.
 - A **pure Entra-ID-joined** host that requires NLA **can't be reached from
-  Linux** — that path (PKU2U) needs Windows-only components. The fix is to have
+  Linux**. That path (PKU2U) needs Windows-only components. The fix is to have
   your admin enable *Microsoft Entra ID authentication* on the host pool, after
   which sign-in is token-based with no password prompt.
 - If your host pool needs a specific domain instead of the empty default, set it
@@ -537,7 +627,7 @@ gateway — the password is only for the session-host logon.
 ## Microsoft Teams calls
 
 Teams **chat and file sharing work**, and **call audio (plus, experimentally,
-video) can be media-optimized** by a bundled add-in — see *Teams call
+video) can be media-optimized** by a bundled add-in. See *Teams call
 optimization* below. Microsoft's Teams optimization, the *WebRTC Redirector*
 that hands call media to the client over a dedicated virtual channel, is
 officially only in the Windows App and Microsoft Remote Desktop clients, and
@@ -545,7 +635,7 @@ upstream FreeRDP has no such channel.
 
 With optimization **off** (the default), Teams runs call media **on the session
 host itself** (no "AVD Media Optimized" banner). That only works if the host can
-reach Teams' media relays directly — outbound **UDP 3478–3481** to the
+reach Teams' media relays directly, using outbound **UDP 3478–3481** to the
 Teams/Microsoft 365 media IP ranges. On host pools where that egress is locked
 down, calls started inside the session fail to connect (Teams logs a
 `MediaWhitelistingIssue` / `no relays` ICE error) even though the same account
@@ -565,7 +655,7 @@ optimized"** on a call.
 - **Audio is the solid part**, and is what the setting enables on its own.
 - **Camera and video are experimental** and off by default (a second, nested
   checkbox). While optimization is on, Teams takes its camera from this add-in,
-  so with video **off** a call has **no camera** — other apps in the session
+  so with video **off** a call has **no camera**. Other apps in the session
   still use the normal redirected camera as usual. With video **on** you get
   your webcam in calls, but it is early: your video opens in a separate window,
   sharing your own screen is not supported, and because the add-in runs inside
@@ -577,13 +667,14 @@ place the call from a Teams client outside the VM.
 
 ## Status
 
-Working: feed discovery, keyring-backed sign-in with click-through re-auth,
-the workspace grid, silent connect, camera/mic/multi-monitor, and self-updating
-Flatpak install. Contributions welcome.
+Working: feed discovery, keyring-backed sign-in, security keys, grouping and
+filters, Hyprland workspaces, launcher entries, silent connect, and
+camera/mic/multi-monitor. Changes that are not Omarchy-specific are better
+sent to [upstream](https://github.com/shakeelosmani/avd_feed_connect).
 
 ## License
 
-MIT for this app's code. Bundled components keep their own licenses (FreeRDP:
+MIT for this app's code, the same as upstream. Bundled components keep their own licenses (FreeRDP:
 Apache-2.0, SDL: Zlib).
 
 ### Optional GNOME connection workspaces

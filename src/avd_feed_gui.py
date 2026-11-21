@@ -62,17 +62,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # initializes its renderer. setdefault so a user can still force the GPU path.
 os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 
-APP_ID = "io.github.shakeelosmani.avd_feed_connect"
+APP_ID = "io.github.roddolf.CloudPcConnect"
 
 import gi  # noqa: E402
 gi.require_version("Gtk", "4.0")
 gi.require_version("WebKit", "6.0")
+gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import GLib  # noqa: E402
 # The X11 window class comes from the program name, which is otherwise
 # "python3". Use the app id so docks match the .desktop file and window
 # managers can target the window with rules. Must run before GTK initializes.
 GLib.set_prgname(APP_ID)
-from gi.repository import Gtk, Gdk, Gio  # noqa: E402
+from gi.repository import Gtk, Gdk, GdkPixbuf, Gio, Pango  # noqa: E402
 from gi.repository import WebKit  # noqa: E402
 
 # The feed/auth package is installed as a sibling directory next to this file.
@@ -81,6 +82,9 @@ from avd_feed_connect import config, display, http  # noqa: E402
 from avd_feed_connect.auth.oauth import _b64url  # noqa: E402
 from avd_feed_connect.client import AvdClient  # noqa: E402
 from avd_feed_connect.gui.workspaces import select_backend as workspace_backend  # noqa: E402
+from avd_feed_connect.gui.workspaces import HyprlandPlacement, HyprlandWorkspaceBackend, valid_workspace  # noqa: E402
+from avd_feed_connect.gui import resource_groups  # noqa: E402
+from avd_feed_connect.gui import launchers, omarchy as omarchy_theme  # noqa: E402
 from avd_feed_connect.rdp.security import resolve_security  # noqa: E402
 from avd_feed_connect.rdp.resources import local_resource  # noqa: E402
 from avd_feed_connect.rdp.attempt import ConnectionAttempt  # noqa: E402
@@ -103,7 +107,8 @@ from avd_feed_connect.accounts import (  # noqa: E402
 from avd_feed_connect.auth.tokens import TokenStore  # noqa: E402
 from avd_feed_connect.gui.session import AccountSession  # noqa: E402
 
-APP_NAME = "AVD Feed + Connect Linux"
+APP_NAME = "Cloud PC Connect"
+HYPR_WORKSPACES = list(range(1, 11))
 APP_VERSION = "0.13.0"
 # LOCAL_PROFILE_ID (the synthetic account for user-opened .rdp files, issue #17)
 # is imported from avd_feed_connect.accounts, its single source of truth.
@@ -233,11 +238,14 @@ class AvdApp(Gtk.Application):
         self.status = None
         self._account_sections = {}
         self._account_status_widgets = {}
+        self._kind_boxes = []       # one per Cloud PCs / desktops / apps section
         self._tiles = []            # GTK4 FlowBox has no get_children(); track ours
         self._signout_item = None
         self._scale = 1             # client display scale factor (1 or 2 = HiDPI)
         self._n_monitors = 1        # how many monitors the compositor reports
         self._settings = storage.load_settings()   # application-wide defaults and appearance
+        if storage.tidy_extra_args(self._settings):
+            storage.save_settings(self._settings)
         self.view_mode = "all" if self._settings.get("_account_view") == "all" else "account"
         configure(self._settings.get("_language", "system"))
         self._signin_dlg = None      # the open sign-in window, if any
@@ -274,11 +282,30 @@ class AvdApp(Gtk.Application):
                 uri = f.get_uri()
             except Exception:
                 uri = None
-            if uri and is_broker_redirect(uri):
+            target = launchers.parse_connect_uri(uri)
+            if target:
+                self._connect_from_launcher(*target)
+                delivered = True
+            elif uri and is_broker_redirect(uri):
                 delivered = (self._deliver_scheme_code(uri)
                              or self._deliver_scheme_conn(uri) or delivered)
         if not delivered:
             self.do_activate()
+
+    def _connect_from_launcher(self, account_id, resource_id):
+        """Open a Cloud PC from its app launcher entry."""
+        self.do_activate()
+        session = self.accounts.get(account_id)
+        if session is None or session.removed:
+            self._error(tr("This launcher belongs to an account that is no longer signed in."))
+            return
+        if session is not self.current and self.view_mode != "all":
+            self._select_account(account_id)
+        child = session.tiles.get(resource_id)
+        if child is not None:
+            self._on_tile_activated(None, child)
+        else:
+            session.pending_launch = (resource_id, False)
 
     def _scheme_connect(self, session):
         """Whether this session's connection-time AAD should auto-capture via the
@@ -374,6 +401,7 @@ class AvdApp(Gtk.Application):
                             and bool(self.current and self.current.resources))
         if not start_hidden:
             self.win.present()
+            self._place_main_window()
         self._detect_displays()
         self._start_tray()
         if start_hidden:
@@ -403,6 +431,23 @@ class AvdApp(Gtk.Application):
             self._select_account(self.selected_id)
         else:
             self._show("signin")
+
+    def _place_main_window(self):
+        """Move the main window to its configured Hyprland workspace once mapped."""
+        workspace = self._settings.get("_window_workspace", "")
+        backend = workspace_backend()
+        if not valid_workspace(workspace) or not isinstance(backend, HyprlandWorkspaceBackend):
+            return
+        tries = [0]
+        def place():
+            tries[0] += 1
+            try:
+                if backend.place_app_window(APP_NAME, APP_ID, workspace):
+                    return GLib.SOURCE_REMOVE
+            except (OSError, ValueError):
+                return GLib.SOURCE_REMOVE
+            return tries[0] < 20
+        GLib.timeout_add(100, place)
 
     @property
     def current(self):
@@ -489,7 +534,7 @@ class AvdApp(Gtk.Application):
     def _edit_account_name(self, session):
         if session.removed:
             return
-        dialog = create(Gtk.Window, title=tr("Edit account name"), transient_for=self.win, modal=True)
+        dialog = create(Gtk.Window, title=tr("Edit account name"), transient_for=self.win)
         dialog.add_css_class("avd-settings")
         dialog.set_default_size(380, -1)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -530,6 +575,8 @@ class AvdApp(Gtk.Application):
         buttons.append(save)
         box.append(buttons)
         dialog.set_child(box)
+        dialog.set_default_widget(save)
+        self._light_dismiss(dialog)
         dialog.present()
 
     def _add_account(self, browser=None, remember=False):
@@ -642,7 +689,8 @@ class AvdApp(Gtk.Application):
         keys = Gtk.ShortcutController()
         for trigger, handler in (("<Control>r", self._on_refresh_shortcut),
                                  ("F5", self._on_refresh_shortcut),
-                                 ("slash", self._on_filter_shortcut)):
+                                 ("slash", self._on_filter_shortcut),
+                                 ("<Control>f", self._on_filter_shortcut)):
             keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string(trigger),
                                                Gtk.CallbackAction.new(handler)))
         self.win.add_controller(keys)
@@ -661,7 +709,7 @@ class AvdApp(Gtk.Application):
         mark.set_pixel_size(14); mark.add_css_class("mark"); mark.set_valign(Gtk.Align.CENTER)
         tbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         tbox.set_valign(Gtk.Align.CENTER)      # center the title block next to the logo
-        t1 = create(Gtk.Label, label="AVD Feed + Connect", xalign=0); t1.add_css_class("brand-title")
+        t1 = create(Gtk.Label, label="Cloud PC Connect", xalign=0); t1.add_css_class("brand-title")
         t2 = create(Gtk.Label, label="Azure Virtual Desktop · Windows 365", xalign=0)
         t2.add_css_class("brand-sub")
         tbox.append(t1); tbox.append(t2)
@@ -889,19 +937,37 @@ class AvdApp(Gtk.Application):
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         for m, v in (("top", 14), ("start", 22), ("end", 22), ("bottom", 2)):
             getattr(head, f"set_margin_{m}")(v)
-        head.set_size_request(-1, 28)  # room for the filter entry without a layout jump
-        sh = create(Gtk.Label, label=tr("YOUR WORKSPACES"), xalign=0); sh.add_css_class("section-h")
-        sh.set_hexpand(True)
-        self._count_lbl = create(Gtk.Label, label="", xalign=1); self._count_lbl.add_css_class("count")
-        # Hidden until "/" — narrows the tiles by title, Esc clears it.
-        self._filter = create(Gtk.SearchEntry, placeholder_text=tr("Filter workspaces…"))
+        head.set_spacing(8)
+        # Search ("/" focuses it, Esc clears it) plus one drop-down per facet.
+        # Drop-down choices persist in settings.json under "_filters".
+        self._filter = create(Gtk.SearchEntry, placeholder_text=tr("Search resources…"))
         self._filter.add_css_class("filter")
-        self._filter.set_valign(Gtk.Align.CENTER); self._filter.set_margin_end(10)
-        self._filter.set_visible(False)
+        self._filter.set_hexpand(True)
+        self._filter.set_valign(Gtk.Align.CENTER)
         self._filter.connect("search-changed", lambda *_: self._apply_filter())
         self._filter.connect("stop-search", lambda *_: self._close_filter())
         self._filter.connect("activate", lambda *_: self._focus_first_tile())
-        head.append(sh); head.append(self._filter); head.append(self._count_lbl)
+        head.append(self._filter)
+        self._facets = {}
+        saved_filters = self._settings.get("_filters", {})
+        for facet, all_label in (("kind", "All types"), ("region", "All regions"),
+                                 ("workspace", "All workspaces"), ("app", "All apps")):
+            dropdown = Gtk.DropDown(model=Gtk.StringList.new([tr(all_label)]))
+            dropdown.add_css_class("facet")
+            dropdown.set_valign(Gtk.Align.CENTER)
+            dropdown.set_factory(self._facet_factory(14))
+            dropdown.set_list_factory(self._facet_factory(0))
+            dropdown._all_label = all_label
+            dropdown._values = [resource_groups.ALL]
+            dropdown._wanted = saved_filters.get(facet, resource_groups.ALL)
+            dropdown.connect("notify::selected", self._on_facet_changed)
+            bind(dropdown, 'tooltip_text', tr({"kind": "Resource type", "region": "Region",
+                                               "workspace": "Workspace", "app": "App"}[facet]))
+            self._facets[facet] = dropdown
+            head.append(dropdown)
+        self._count_lbl = create(Gtk.Label, label="", xalign=1); self._count_lbl.add_css_class("count")
+        self._count_lbl.set_valign(Gtk.Align.CENTER)
+        head.append(self._count_lbl)
         wp.append(head)
 
         sw = Gtk.ScrolledWindow()
@@ -1003,22 +1069,105 @@ class AvdApp(Gtk.Application):
     def _on_filter_shortcut(self, *_):
         if self.stack.get_visible_child_name() != "workspaces" or not self._tiles:
             return False
-        self._filter.set_visible(True)
         self._filter.grab_focus()
         return True
 
+    @staticmethod
+    def _facet_factory(max_chars):
+        """Labels for a facet drop-down; the button ellipsizes, the list does not."""
+        factory = Gtk.SignalListItemFactory()
+        def setup(_factory, item):
+            label = Gtk.Label(xalign=0)
+            if max_chars:
+                label.set_ellipsize(Pango.EllipsizeMode.END)
+                label.set_max_width_chars(max_chars)
+            item.set_child(label)
+        factory.connect("setup", setup)
+        factory.connect("bind", lambda _f, item: item.get_child().set_text(item.get_item().get_string()))
+        return factory
+
+    def _filter_values(self):
+        facets = getattr(self, "_facets", {})
+        return {facet: dd._values[dd.get_selected()] if dd.get_selected() < len(dd._values)
+                else resource_groups.ALL for facet, dd in facets.items()}
+
     def _filter_tile(self, child):
         entry = getattr(self, "_filter", None)
-        query = entry.get_text().strip().casefold() if entry else ""
-        return not query or query in child._res.get("title", "").casefold()
+        values = self._filter_values()
+        return resource_groups.matches(
+            child._res, entry.get_text() if entry else "",
+            values.get("kind", ""), values.get("region", ""),
+            values.get("workspace", ""), values.get("app", ""))
+
+    def _refresh_filter_options(self):
+        """Offer only values present in the shown feed; keep each saved choice."""
+        resources = [child._res for child in self._tiles]
+        facets = getattr(self, "_facets", {})
+        everything = resource_groups.options(resources)
+        # Each list follows the other choices; a choice is kept even when the
+        # others rule it out, so it can still be cleared.
+        available = resource_groups.options(
+            resources, {facet: dd._wanted for facet, dd in facets.items()})
+        self._updating_facets = True
+        try:
+            for facet, dropdown in facets.items():
+                wanted = dropdown._wanted
+                values = list(available[facet])
+                if wanted and wanted not in values and wanted in everything[facet]:
+                    values.append(wanted)
+                if facet == "kind":
+                    labels = [tr(resource_groups.KIND_LABELS[v]) for v in values]
+                elif facet == "region":
+                    labels = [tr(v) for v in values]
+                elif facet == "workspace":
+                    labels = [resource_groups.workspace_label(v) for v in values]
+                else:
+                    labels = list(values)
+                if dropdown._values != [resource_groups.ALL] + values:
+                    dropdown._values = [resource_groups.ALL] + values
+                    dropdown.set_model(Gtk.StringList.new([tr(dropdown._all_label)] + labels))
+                dropdown.set_selected(dropdown._values.index(wanted) if wanted in dropdown._values else 0)
+                # A facet with one value in the whole feed cannot narrow anything.
+                dropdown.set_visible(len(everything[facet]) > 1)
+        finally:
+            self._updating_facets = False
+
+    def _on_facet_changed(self, dropdown, *_):
+        if getattr(self, "_updating_facets", False):
+            return
+        dropdown._wanted = dropdown._values[dropdown.get_selected()] \
+            if dropdown.get_selected() < len(dropdown._values) else resource_groups.ALL
+        self._settings["_filters"] = {facet: dd._wanted for facet, dd in self._facets.items() if dd._wanted}
+        storage.save_settings(self._settings)
+        self._refresh_filter_options()
+        self._apply_filter()
 
     def _apply_filter(self):
         for grid in {t.get_parent() for t in self._tiles if t.get_parent() is not None}:
             grid.invalidate_filter()
+        shown = 0
+        for kind_box in getattr(self, "_kind_boxes", []):
+            any_group = False
+            in_kind = 0
+            for group in kind_box._groups:
+                visible = sum(1 for child in group._tiles if self._filter_tile(child))
+                group.set_visible(visible > 0)
+                any_group = any_group or visible > 0
+                shown += visible
+                in_kind += visible
+                if getattr(group, "_count", None) is not None:
+                    group._count.set_text(str(visible))
+            kind_box.set_visible(any_group)
+            if getattr(kind_box, "_count", None) is not None:
+                kind_box._count.set_text(str(in_kind))
+        total = len(self._tiles)
+        text = (ngettext("{count} resource", "{count} resources", total).format(count=total)
+                if shown == total else tr("{shown} of {total}").format(shown=shown, total=total))
+        if getattr(self, "_count_lbl", None) is not None:
+            bind(self._count_lbl, 'text', text)
 
     def _close_filter(self):
         self._filter.set_text("")
-        self._filter.set_visible(False)
         self._apply_filter()
         self._focus_first_tile()
 
@@ -1997,6 +2146,7 @@ class AvdApp(Gtk.Application):
             self._resource_box.remove(child)
             child = self._resource_box.get_first_child()
         self._account_sections = {}
+        self._kind_boxes = []
         self._tray_refresh()
 
     def _render_resources(self, session=None):
@@ -2008,6 +2158,7 @@ class AvdApp(Gtk.Application):
                 if child._account is session:
                     child.get_parent().remove(child)
             self._tiles = [child for child in self._tiles if child._account is not session]
+            self._kind_boxes = [box for box in self._kind_boxes if not box.is_ancestor(section)]
             self._resource_box.remove(section)
         else:
             self._clear_tiles()
@@ -2040,37 +2191,70 @@ class AvdApp(Gtk.Application):
                 self._account_status_widgets[owner.id] = (status_label, signin)
                 row.set_visible(bool(message) or not owner.resources)
                 section.append(row)
-            groups = {}
-            for resource in owner.resources:
-                groups.setdefault((resource.get("tenant_id", ""), resource.get("tenant") or "Workspace"), []).append(resource)
-            if self.view_mode != "all":
-                groups = {("", ""): owner.resources}
-            for (_, workspace), resources in groups.items():
-                if workspace:
-                    label = Gtk.Label(label=workspace, xalign=0, margin_start=22, wrap=True)
-                    label.add_css_class("status")
-                    section.append(label)
-                grid = Gtk.FlowBox(valign=Gtk.Align.START, max_children_per_line=5,
-                                   min_children_per_line=2, row_spacing=14, column_spacing=14,
-                                   homogeneous=True, selection_mode=Gtk.SelectionMode.NONE,
-                                   margin_top=8, margin_bottom=18, margin_start=22, margin_end=22)
-                grid.connect("child-activated", self._on_tile_activated)
-                grid.set_filter_func(self._filter_tile)
-                section.append(grid)
-                self.grid = grid
-                for res in resources:
-                    child = owner.tiles.get(res["id"])
-                    if child is None:
-                        child = self._make_tile(res, owner)
-                        owner.tiles[res["id"]] = child
-                    child._res = res
-                    grid.append(child)
-                    self._tiles.append(child)
+            # Cloud PCs first, then pooled desktops, then apps by workspace.
+            # Vertical rhythm comes from box spacing only (never margins on the
+            # first/last child), so hiding sections or groups while filtering
+            # keeps every remaining gap identical.
+            kinds = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=28,
+                            margin_top=10, margin_bottom=18)
+            section.append(kinds)
+            for kind, groups in resource_groups.sections(owner.resources):
+                kind_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+                kind_box._groups = []
+                caption = Gtk.Box(spacing=8, margin_start=22, margin_end=22)
+                heading = create(Gtk.Label, label=tr(resource_groups.KIND_LABELS[kind]).upper(), xalign=0)
+                heading.add_css_class("section-h")
+                caption.append(heading)
+                kind_box._count = Gtk.Label(xalign=0)
+                kind_box._count.add_css_class("section-count")
+                caption.append(kind_box._count)
+                kind_box.append(caption)
+                group_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+                kind_box.append(group_box)
+                kinds.append(kind_box)
+                self._kind_boxes.append(kind_box)
+                for workspace, resources in groups:
+                    group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+                    group._count = None
+                    if workspace:
+                        # Workspace subgroup: a lighter, mixed-case heading with a
+                        # hairline so it reads as subordinate to the section caption.
+                        sub = Gtk.Box(spacing=8, margin_start=22, margin_end=22)
+                        label = Gtk.Label(label=workspace, xalign=0, wrap=True)
+                        label.add_css_class("subsection-h")
+                        sub.append(label)
+                        group._count = Gtk.Label(xalign=0)
+                        group._count.add_css_class("section-count")
+                        sub.append(group._count)
+                        rule = Gtk.Separator(hexpand=True, valign=Gtk.Align.CENTER)
+                        rule.add_css_class("subsection-rule")
+                        sub.append(rule)
+                        group.append(sub)
+                    grid = Gtk.FlowBox(valign=Gtk.Align.START, max_children_per_line=5,
+                                       min_children_per_line=2, row_spacing=14, column_spacing=14,
+                                       homogeneous=True, selection_mode=Gtk.SelectionMode.NONE,
+                                       margin_start=22, margin_end=22)
+                    grid.connect("child-activated", self._on_tile_activated)
+                    grid.set_filter_func(self._filter_tile)
+                    group.append(grid)
+                    group_box.append(group)
+                    self.grid = grid
+                    group._tiles = []
+                    kind_box._groups.append(group)
+                    for res in resources:
+                        child = owner.tiles.get(res["id"])
+                        if child is None:
+                            child = self._make_tile(res, owner)
+                            owner.tiles[res["id"]] = child
+                        child._res = res
+                        grid.append(child)
+                        self._tiles.append(child)
+                        group._tiles.append(child)
+            kinds.set_visible(bool(owner.resources))
             if self.view_mode != "all" and not owner.resources:
                 section.append(self._empty_state())
-        count = len(self._tiles)
-        bind(self._count_lbl, 'text',
-             ngettext("{count} resource", "{count} resources", count).format(count=count))
+        self._refresh_filter_options()
+        self._apply_filter()
         bind(self.status, 'text',
              tr("All accounts") if self.view_mode == "all"
              else self.current.display_name if self.current and self.current.local
@@ -2109,8 +2293,11 @@ class AvdApp(Gtk.Application):
             self._tray_refresh()
         icon_resources = resources
         if getattr(session, "_icon_resources", None) == resources:
-            icon_resources = [res for res in resources if res.get("icon32") and
-                              not os.path.isfile(storage.icon_path(res["id"], session.directory))]
+            icon_resources = [res for res in resources if
+                              (res.get("icon32") and
+                               not os.path.isfile(storage.icon_path(res["id"], session.directory)))
+                              or (res.get("icon_raw") and
+                                  not os.path.isfile(storage.large_icon_path(res["id"], session.directory)))]
         if icon_resources:
             session._icon_resources = [dict(resource) for resource in resources]
             tiles = [session.tiles[res["id"]] for res in icon_resources if res["id"] in session.tiles]
@@ -2231,12 +2418,32 @@ class AvdApp(Gtk.Application):
                 pill.set_visible(False)
         GLib.idle_add(apply)
 
+    def _load_large_icon(self, res, session, token):
+        """Cache the feed's IconRaw as PNG for app launcher entries."""
+        url = res.get("icon_raw")
+        path = storage.large_icon_path(res["id"], session.directory)
+        if not url or not token or os.path.isfile(path):
+            return
+        try:
+            png = launchers.ico_to_png(storage.bearer_bytes(url, token))
+        except Exception:
+            png = None
+        if not png:
+            return
+        with session.refresh_lock:
+            if session.removed:
+                return
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(png)
+
     def _load_icons(self, resources, session, tiles):
         children = {c._res["id"]: c for c in tiles}
         token = session.token
         for res in resources:
             if session.removed:
                 return
+            self._load_large_icon(res, session, token)
             url = res.get("icon32")
             if not url:
                 continue
@@ -2529,7 +2736,14 @@ class AvdApp(Gtk.Application):
             return
         backend = workspace_backend()
         workspace_title = None
-        if res.get("type") == "Desktop" and self._eff("new_workspace", res, session) == "on" \
+        hypr_workspace = None
+        if isinstance(backend, HyprlandWorkspaceBackend):
+            wanted = self._eff("hypr_workspace", res, session)
+            if res.get("type") == "Desktop" and valid_workspace(wanted):
+                hypr_workspace = wanted
+                workspace_title = "CloudPC-" + uuid.uuid4().hex[:12] + " " + res.get("title", "")
+                argv.append("/t:" + workspace_title)
+        elif res.get("type") == "Desktop" and self._eff("new_workspace", res, session) == "on" \
                 and backend is not None and backend.available():
             workspace_title = "AVD-" + uuid.uuid4().hex
             # Last option wins over any custom /t flag. No resource/account data
@@ -2578,7 +2792,14 @@ class AvdApp(Gtk.Application):
                 if args_fd is not None:
                     os.close(args_fd)
         def publish():
-            child._workspace_placement = backend.create_placement(proc, workspace_title) if workspace_title else None
+            if hypr_workspace:
+                child._workspace_placement = backend.create_placement(
+                    proc, workspace_title.split(" ", 1)[0], hypr_workspace,
+                    follow=self._settings.get("_follow_workspace", True))
+                GLib.idle_add(child._workspace_placement.start)
+            else:
+                child._workspace_placement = (backend.create_placement(proc, workspace_title)
+                                              if workspace_title else None)
             child._proc = proc
             child._ptym = master
         if not attempt.publish(publish):
@@ -2735,7 +2956,8 @@ class AvdApp(Gtk.Application):
                 GLib.idle_add(remember)
             placement = getattr(child, "_workspace_placement", None)
             if placement:
-                GLib.idle_add(placement.start)
+                GLib.idle_add(placement.on_connected if isinstance(placement, HyprlandPlacement)
+                              else placement.start)
             self._set_tile_state(res["id"], "state-connected", session, attempt=attempt)
             self._set_status(tr("Connected to {resource}").format(resource=res['title']), session, attempt=attempt)
             self._set_connecting(res["id"], res["title"], False, session, attempt=attempt)  # desktop is up
@@ -3284,14 +3506,94 @@ class AvdApp(Gtk.Application):
                  os.environ.get("AVD_EXTRA_ARGS", "")]
         return " ".join(p.strip() for p in parts if p and p.strip()).strip()
 
-    def _form_row(self, label, widget):
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        lbl = create(Gtk.Label, label=label, xalign=0)
+    SETTINGS_CONTROL_WIDTH = 260
+
+    def _form_row(self, label, widget, width=None):
+        """Label left, control right; a fixed control width keeps one straight column."""
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        lbl = create(Gtk.Label, label=label, xalign=0, wrap=True)
         lbl.set_hexpand(True)
         widget.set_halign(Gtk.Align.END)
+        widget.set_valign(Gtk.Align.CENTER)
+        if width:
+            widget.set_hexpand(False)
+            widget.set_size_request(width, -1)
+            if isinstance(widget, Gtk.DropDown):
+                # Ellipsize the closed button so long choices cannot widen the column;
+                # the open list still shows every choice in full.
+                widget.set_factory(self._facet_factory(1))
+                widget.set_list_factory(self._facet_factory(0))
         row.append(lbl)
         row.append(widget)
         return row
+
+    def _dialog_max_height(self, reserved=200):
+        """Tallest scrollable body that keeps a dialog on the main window's monitor."""
+        display = Gdk.Display.get_default()
+        monitor = None
+        surface = self.win.get_surface() if self.win is not None else None
+        if display is not None and surface is not None:
+            monitor = display.get_monitor_at_surface(surface)
+        if monitor is None and display is not None and display.get_monitors().get_n_items():
+            monitor = display.get_monitors().get_item(0)
+        height = monitor.get_geometry().height if monitor is not None else 900
+        return max(240, min(760, height - reserved))
+
+    def _light_dismiss(self, dialog, cancel=None):
+        """Esc, or a click on the main window, cancels a small app dialog.
+
+        The dialog is deliberately not GTK-modal: a modal toplevel makes Hyprland
+        (modal_parent_blocking) and GTK's grab swallow clicks on the parent, so
+        "click outside to close" could never fire. Modality is emulated instead:
+        while a dialog is open, presses on the main window cancel it and keys
+        typed there are swallowed (Esc cancels, anything else refocuses it).
+        """
+        cancel = cancel or dialog.destroy
+        dialog._cancel = cancel
+        keys = Gtk.EventControllerKey()
+        def on_key(_controller, keyval, _keycode, state):
+            if keyval == Gdk.KEY_Escape and not state & Gtk.accelerator_get_default_mod_mask():
+                cancel()
+                return True
+            return False
+        keys.connect("key-pressed", on_key)
+        dialog.add_controller(keys)
+        self._light_dialogs = [d for d in self._open_light_dialogs() if d is not dialog] + [dialog]
+        if self.win is not None and not getattr(self.win, "_dialog_guard", False):
+            self.win._dialog_guard = True
+            press = Gtk.GestureClick(button=0)
+            press.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            press.connect("pressed", self._on_parent_pressed_with_dialog)
+            self.win.add_controller(press)
+            parent_keys = Gtk.EventControllerKey()
+            parent_keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            parent_keys.connect("key-pressed", self._on_parent_key_with_dialog)
+            self.win.add_controller(parent_keys)
+
+    def _open_light_dialogs(self):
+        # GTK4 emits "destroy" only at finalization, so prune closed dialogs here.
+        alive = Gtk.Window.list_toplevels()
+        self._light_dialogs = [d for d in getattr(self, "_light_dialogs", []) if d in alive]
+        return self._light_dialogs
+
+    def _on_parent_pressed_with_dialog(self, gesture, *_args):
+        dialogs = list(self._open_light_dialogs())
+        if not dialogs:
+            return
+        # Claim the press so the click only closes the dialog (no tile launch).
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        for dialog in reversed(dialogs):
+            dialog._cancel()
+
+    def _on_parent_key_with_dialog(self, _controller, keyval, _keycode, _state):
+        dialogs = self._open_light_dialogs()
+        if not dialogs:
+            return False
+        if keyval == Gdk.KEY_Escape:
+            dialogs[-1]._cancel()
+        else:
+            dialogs[-1].present()
+        return True
 
     def _open_settings(self, res, session=None):
         session = session or self.current
@@ -3302,12 +3604,72 @@ class AvdApp(Gtk.Application):
         auto_note = (tr("Automatic uses your Default settings, then the display.")
                      if res else tr("Automatic matches your display and monitors."))
 
-        dlg = create(Gtk.Window, title=title, transient_for=self.win, modal=True)
+        dlg = create(Gtk.Window, title=title, transient_for=self.win)
         dlg.add_css_class("avd-settings")
-        dlg.set_default_size(440, -1)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        for m in ("top", "bottom", "start", "end"):
-            getattr(box, f"set_margin_{m}")(16)
+        dlg.set_default_size(580, -1)
+
+        # Header: which resource is being configured, like the main window's brand block.
+        header = Gtk.HeaderBar()
+        header.add_css_class("avd-header")
+        header.set_title_widget(Gtk.Box())
+        heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, margin_start=14)
+        if res:
+            head_title = Gtk.Label(label=res["title"], xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                                   max_width_chars=40)
+            kind = resource_groups.kind(res)
+            kind_label = tr({resource_groups.PC: "Cloud PC", resource_groups.DESKTOP: "Virtual desktop",
+                             resource_groups.APP: "App"}[kind])
+            workspace = resource_groups.workspace(res)
+            head_sub = create(Gtk.Label, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=48,
+                              label=tr("{kind} · {workspace}").format(kind=kind_label, workspace=workspace)
+                              if workspace else kind_label)
+        else:
+            head_title = create(Gtk.Label, label=tr("Default connection settings"), xalign=0)
+            head_sub = create(Gtk.Label, label=tr("Used by every resource without its own settings"),
+                              xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=48)
+        head_title.add_css_class("brand-title")
+        head_sub.add_css_class("brand-sub")
+        heading.append(head_title)
+        heading.append(head_sub)
+        header.pack_start(heading)
+        dlg.set_titlebar(header)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        box.set_margin_top(18); box.set_margin_bottom(22)
+        box.set_margin_start(22); box.set_margin_end(22)
+        width = self.SETTINGS_CONTROL_WIDTH
+        sections = []
+
+        def section(caption):
+            """A captioned group, styled like the main window's section captions."""
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            label = create(Gtk.Label, label=caption, xalign=0)
+            label.add_css_class("section-h")
+            body.append(label)
+            box.append(body)
+            sections.append(body)
+            return body
+
+        def field(parent, label, widget, note=None):
+            """A form row plus its optional help text, kept together."""
+            group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            row = self._form_row(label, widget, width)
+            group.append(row)
+            if note is not None:
+                note.add_css_class("tile-sub")
+                group.append(note)
+            parent.append(group)
+            return row
+
+        def help_text(text):
+            return create(Gtk.Label, label=text, xalign=0, wrap=True)
+
+        general = section(tr("GENERAL")) if res is None else None
+        display_section = section(tr("DISPLAY"))
+        connection = section(tr("CONNECTION"))
+        placement = section(tr("PLACEMENT"))
+        signin_section = section(tr("SIGN-IN")) if res is None else None
+        advanced = section(tr("ADVANCED"))
 
         # Language is an app-wide preference, shown only in the Default settings
         # dialog (res is None). It applies immediately and is persisted on change
@@ -3318,11 +3680,7 @@ class AvdApp(Gtk.Application):
             current_language = self._settings.get("_language", "system")
             language_dd.set_selected(language_keys.index(current_language)
                                      if current_language in language_keys else 0)
-            box.append(self._form_row(tr("Language"), language_dd))
-            language_note = create(Gtk.Label, label=tr("Language changes apply immediately."),
-                                   xalign=0, wrap=True)
-            language_note.add_css_class("tile-sub")
-            box.append(language_note)
+            field(general, tr("Language"), language_dd, help_text(tr("Language changes apply immediately.")))
 
             def change_language(dropdown, *_args):
                 if getattr(self, "_changing_language", False):
@@ -3335,26 +3693,23 @@ class AvdApp(Gtk.Application):
         scale_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.SCALE_LABELS]))
         sv = cur.get("scale", "auto")
         scale_dd.set_selected(storage.SCALE_VALUES.index(sv) if sv in storage.SCALE_VALUES else 0)
-        box.append(self._form_row(tr("Display scale"), scale_dd))
+        field(display_section, tr("Display scale"), scale_dd)
 
         mm_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.MULTIMON_LABELS]))
         mv = cur.get("multimon", "auto")
         mm_dd.set_selected(storage.MULTIMON_VALUES.index(mv) if mv in storage.MULTIMON_VALUES else 0)
-        box.append(self._form_row(tr("Monitors"), mm_dd))
+        field(display_section, tr("Monitors"), mm_dd)
 
         cert_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.CERT_LABELS]))
         cv = cur.get("cert", "auto")
         cert_dd.set_selected(storage.CERT_VALUES.index(cv) if cv in storage.CERT_VALUES else 0)
-        box.append(self._form_row(tr("Server certificate"), cert_dd))
+        field(connection, tr("Server certificate"), cert_dd)
 
         sec_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.SEC_LABELS]))
         sec_value = cur.get("sec", "auto")
         sec_dd.set_selected(storage.SEC_VALUES.index(sec_value) if sec_value in storage.SEC_VALUES else 0)
-        box.append(self._form_row(tr("Session authentication"), sec_dd))
-        auth_note = create(Gtk.Label, xalign=0, wrap=True,
-            label=tr("Automatic respects the feed and remembers successful connections. If your feed does not advertise SSO, select Entra to test it. This does not bypass MFA or your organization's sign-in policy."))
-        auth_note.add_css_class("tile-sub")
-        box.append(auth_note)
+        field(connection, tr("Session authentication"), sec_dd, help_text(
+            tr("Automatic respects the feed and remembers successful connections. If your feed does not advertise SSO, select Entra to test it. This does not bypass MFA or your organization's sign-in policy.")))
 
         # RemoteApp (published single app) tiles can optionally open as the host's
         # full desktop — the fallback for when the app's own window doesn't appear
@@ -3368,26 +3723,19 @@ class AvdApp(Gtk.Application):
             rav = cur.get("remoteapp", "auto")
             remoteapp_dd.set_selected(storage.REMOTEAPP_VALUES.index(rav)
                                       if rav in storage.REMOTEAPP_VALUES else 0)
-            box.append(self._form_row(tr("Open RemoteApp as"), remoteapp_dd))
-            remoteapp_note = create(Gtk.Label, xalign=0, wrap=True,
-                label=tr("Full desktop opens the whole remote PC so you can launch the app yourself — use this if the app window never appears."))
-            remoteapp_note.add_css_class("tile-sub")
-            box.append(remoteapp_note)
+            field(connection, tr("Open RemoteApp as"), remoteapp_dd, help_text(
+                tr("Full desktop opens the whole remote PC so you can launch the app yourself — use this if the app window never appears.")))
 
         hk_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.HOTKEY_LABELS]))
         hv = cur.get("hotkeys", "auto")
         custom_hotkeys = hv if isinstance(hv, dict) else {}
         hv = "custom" if isinstance(hv, dict) else hv
         hk_dd.set_selected(storage.HOTKEY_VALUES.index(hv) if hv in storage.HOTKEY_VALUES else 0)
-        box.append(self._form_row(tr("Client shortcuts"), hk_dd))
-
-        hotkey_note = create(Gtk.Label,
-            label=tr("Right Shift + D disconnects. Choose Disabled to send all keys to the remote PC, or Custom to change shortcuts. All actions share the same modifiers."),
-            xalign=0, wrap=True)
-        hotkey_note.add_css_class("tile-sub")
-        box.append(hotkey_note)
+        field(connection, tr("Client shortcuts"), hk_dd, help_text(
+            tr("Right Shift + D disconnects. Choose Disabled to send all keys to the remote PC, or Custom to change shortcuts. All actions share the same modifiers.")))
 
         shortcut_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        shortcut_box.add_css_class("settings-subpanel")
         shortcut_note = create(Gtk.Label, label=tr("Hold all selected modifiers, then press the action key."),
                                xalign=0, wrap=True)
         shortcut_box.append(shortcut_note)
@@ -3412,8 +3760,9 @@ class AvdApp(Gtk.Application):
             dropdown.set_selected(HOTKEY_KEYS.index(value) if value in HOTKEY_KEYS
                                   else len(HOTKEY_KEYS))
             action_dropdowns[action] = dropdown
-            shortcut_box.append(self._form_row(tr(label), dropdown))
+            shortcut_box.append(self._form_row(tr(label), dropdown, width))
         reset_shortcuts = create(Gtk.Button, label=tr("Restore FreeRDP shortcuts"))
+        reset_shortcuts.set_halign(Gtk.Align.END)
         def reset_bindings(*_):
             for modifier, check in modifier_checks.items():
                 check.set_active(modifier == "KMOD_RSHIFT")
@@ -3442,7 +3791,7 @@ class AvdApp(Gtk.Application):
         for dropdown in action_dropdowns.values():
             dropdown.connect("notify::selected", validate_shortcuts)
         shortcut_box.set_visible(hv == "custom")
-        box.append(shortcut_box)
+        connection.append(shortcut_box)
 
         workspace_values = storage.WORKSPACE_VALUES if res else storage.WORKSPACE_DEFAULT_VALUES
         workspace_labels = storage.WORKSPACE_LABELS if res else storage.WORKSPACE_DEFAULT_LABELS
@@ -3450,14 +3799,50 @@ class AvdApp(Gtk.Application):
         workspace_value = cur.get("new_workspace", "auto" if res else "off")
         workspace_dd.set_selected(workspace_values.index(workspace_value) if workspace_value in workspace_values else 0)
         workspace_dd.set_sensitive(res is None or res.get("type") == "Desktop")
-        workspace_row = self._form_row(tr("Start connection in a new virtual desktop"), workspace_dd)
-        workspace_supported = workspace_backend() is not None
+        backend = workspace_backend()
+        hyprland = isinstance(backend, HyprlandWorkspaceBackend)
+        workspace_supported = backend is not None and not hyprland
+        workspace_note = help_text(tr("Desktop connections only. Requires the optional GNOME extension; switches to the new workspace when connected."))
+        workspace_row = field(placement, tr("Start connection in a new virtual desktop"), workspace_dd, workspace_note)
         workspace_row.set_visible(workspace_supported)
-        box.append(workspace_row)
-        workspace_note = create(Gtk.Label, label=tr("Desktop connections only. Requires the optional GNOME extension; switches to the new workspace when connected."), xalign=0, wrap=True)
         workspace_note.set_visible(workspace_supported)
-        workspace_note.add_css_class("tile-sub")
-        box.append(workspace_note)
+        workspace_row.get_parent().set_visible(workspace_supported)
+
+        # Hyprland: a fixed workspace per Cloud PC, and where this window opens.
+        hypr_dd = None
+        hypr_labels = [tr("Current workspace")] + [str(n) for n in HYPR_WORKSPACES]
+        if hyprland and res is not None and res.get("type") == "Desktop":
+            hypr_dd = create(Gtk.DropDown, model=strings(hypr_labels))
+            hv_ws = str(cur.get("hypr_workspace", "auto"))
+            hypr_dd.set_selected(HYPR_WORKSPACES.index(int(hv_ws)) + 1
+                                 if hv_ws.isdigit() and int(hv_ws) in HYPR_WORKSPACES else 0)
+            field(placement, tr("Open on workspace"), hypr_dd)
+        if hyprland and res is None:
+            window_dd = create(Gtk.DropDown, model=strings([tr("Any workspace")] + [str(n) for n in HYPR_WORKSPACES]))
+            window_ws = str(self._settings.get("_window_workspace", ""))
+            window_dd.set_selected(HYPR_WORKSPACES.index(int(window_ws)) + 1
+                                   if window_ws.isdigit() and int(window_ws) in HYPR_WORKSPACES else 0)
+            def change_window_workspace(dropdown, *_):
+                index = dropdown.get_selected()
+                if index:
+                    self._settings["_window_workspace"] = str(HYPR_WORKSPACES[index - 1])
+                else:
+                    self._settings.pop("_window_workspace", None)
+                storage.save_settings(self._settings)
+                self._place_main_window()
+            window_dd.connect("notify::selected", change_window_workspace)
+            field(placement, tr("Open this window on workspace"), window_dd)
+            follow_check = create(Gtk.CheckButton, label=tr("Switch to a Cloud PC's workspace when it connects"))
+            follow_check.set_active(bool(self._settings.get("_follow_workspace", True)))
+            follow_check.connect("toggled", lambda c, *_: (
+                self._settings.__setitem__("_follow_workspace", c.get_active()),
+                storage.save_settings(self._settings)))
+            follow = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            follow.append(follow_check)
+            hypr_note = help_text(tr("Pick a workspace for each Cloud PC in its own settings (right-click its tile)."))
+            hypr_note.add_css_class("tile-sub")
+            follow.append(hypr_note)
+            placement.append(follow)
 
         # Sign-in browser identity (User-Agent). Lets a tenant that blocks Linux
         # at sign-in via Conditional Access be satisfied by posing as Edge/Chrome
@@ -3469,18 +3854,16 @@ class AvdApp(Gtk.Application):
         if res is None:
             uav = cur.get("user_agent", "auto")
             ua_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.UA_LABELS]))
-            ua_entry = Gtk.Entry()
-            ua_entry.set_hexpand(True)
+            ua_entry = Gtk.Entry(activates_default=True)
             bind(ua_entry, 'placeholder_text', tr("paste a User-Agent string"))
             if uav in storage.UA_PRESETS:
                 ua_dd.set_selected(storage.UA_PRESETS.index(uav))
             else:
                 ua_dd.set_selected(len(storage.UA_LABELS) - 1)   # "Custom…"
                 bind(ua_entry, 'text', uav)
-            box.append(self._form_row(tr("Sign-in browser"), ua_dd))
-            ua_entry_row = self._form_row(tr("Custom identity"), ua_entry)
+            field(signin_section, tr("Sign-in browser"), ua_dd)
+            ua_entry_row = field(signin_section, tr("Custom identity"), ua_entry).get_parent()
             ua_entry_row.set_visible(ua_dd.get_selected() == len(storage.UA_LABELS) - 1)
-            box.append(ua_entry_row)
             ua_dd.connect(
                 "notify::selected",
                 lambda dd, *_: ua_entry_row.set_visible(
@@ -3495,27 +3878,41 @@ class AvdApp(Gtk.Application):
             dc_check.connect("toggled", lambda c, *_: (
                 self._settings.__setitem__("_browser_signin", c.get_active()),
                 storage.save_settings(self._settings)))
-            box.append(dc_check)
-            dc_note = create(Gtk.Label, xalign=0, wrap=True,
-                label=tr("Required for certificate-based (CBA) sign-in — the built-in "
-                         "sign-in window can't present a smart card. The app shows a code "
-                         "to enter in your browser."))
+            browser_signin = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            browser_signin.append(dc_check)
+            dc_note = help_text(tr("Required for certificate-based (CBA) sign-in — the built-in "
+                                   "sign-in window can't present a smart card. The app shows a code "
+                                   "to enter in your browser."))
             dc_note.add_css_class("tile-sub")
-            box.append(dc_note)
+            browser_signin.append(dc_note)
+            signin_section.append(browser_signin)
 
-        extra_entry = Gtk.Entry()
+        if res is not None and res.get("type") == "Desktop" and session is not None \
+                and not session.local:
+            placement.append(self._launcher_controls(res, session, cur))
+
+        # Enter in a text field saves (the default action) rather than dropping the edit.
+        extra_entry = Gtk.Entry(activates_default=True)
         bind(extra_entry, 'text', cur.get("extra_args", ""))
         bind(extra_entry, 'placeholder_text', tr("advanced: e.g. /gfx /network:auto"))
-        extra_entry.set_hexpand(True)
-        box.append(self._form_row(tr("Advanced flags"), extra_entry))
+        field(advanced, tr("Advanced flags"), extra_entry)
+
+        # Hide captions whose rows are all unavailable here (e.g. no workspace support).
+        for body in sections:
+            child = body.get_first_child().get_next_sibling()
+            shown = False
+            while child is not None:
+                shown = shown or child.get_visible()
+                child = child.get_next_sibling()
+            body.set_visible(shown)
 
         note = create(Gtk.Label, label=tr("{automatic} Applies to your next connection.").format(automatic=auto_note),
-                         xalign=0, wrap=True)
+                         xalign=0, wrap=True, hexpand=True, valign=Gtk.Align.CENTER)
         note.add_css_class("tile-sub")
-        box.append(note)
 
         btnbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        btnbox.set_halign(Gtk.Align.END)
+        btnbox.add_css_class("settings-foot")
+        btnbox.append(note)
         cancel = create(Gtk.Button, label=tr("Cancel"))
         cancel.connect("clicked", lambda *_: dlg.destroy())
         save = create(Gtk.Button, label=tr("Save"))
@@ -3537,7 +3934,7 @@ class AvdApp(Gtk.Application):
                 "sec": storage.SEC_VALUES[sec_dd.get_selected()],
                 "hotkeys": hotkeys,
                 "new_workspace": workspace_values[workspace_dd.get_selected()],
-                "extra_args": extra_entry.get_text().strip(),
+                "extra_args": storage.drop_builtin_flags(extra_entry.get_text().strip()),
             }
             if ua_dd is not None:   # Default settings only; account-wide (issue #28)
                 ua_sel = ua_dd.get_selected()
@@ -3547,12 +3944,23 @@ class AvdApp(Gtk.Application):
                     entry["user_agent"] = storage.UA_PRESETS[ua_sel]
             if remoteapp_dd is not None:   # RemoteApp resources only
                 entry["remoteapp"] = storage.REMOTEAPP_VALUES[remoteapp_dd.get_selected()]
+            if hypr_dd is not None:
+                index = hypr_dd.get_selected()
+                entry["hypr_workspace"] = str(HYPR_WORKSPACES[index - 1]) if index else "auto"
+            elif "hypr_workspace" in cur:
+                entry["hypr_workspace"] = cur["hypr_workspace"]
+            live = settings.get(key, {})   # the launcher controls save as they go
+            for kept in ("launcher_icon", "launcher_id"):
+                if kept in live:
+                    entry[kept] = live[kept]
             # drop an all-default entry so the file stays tidy
             if entry["scale"] == "auto" and entry["multimon"] == "auto" \
                     and entry["cert"] == "auto" and entry["sec"] == "auto" and entry["hotkeys"] == "auto" \
                     and entry["new_workspace"] == ("auto" if res else "off") \
                     and entry.get("user_agent", "auto") == "auto" \
                     and entry.get("remoteapp", "auto") == "auto" \
+                    and entry.get("hypr_workspace", "auto") == "auto" \
+                    and not any(k in entry for k in ("launcher_icon", "launcher_id")) \
                     and not entry["extra_args"]:
                 settings.pop(key, None)
             else:
@@ -3565,19 +3973,156 @@ class AvdApp(Gtk.Application):
             self._set_status(tr("Settings saved — applies to your next connection"))
         validate_shortcuts()
         save.connect("clicked", do_save)
+        cancel.set_valign(Gtk.Align.CENTER)
+        save.set_valign(Gtk.Align.CENTER)
         btnbox.append(cancel)
         btnbox.append(save)
         scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
-                                     propagate_natural_height=True, max_content_height=660)
+                                     propagate_natural_height=True,
+                                     max_content_height=self._dialog_max_height())
         scroller.set_child(box)
         scroller.set_vexpand(True)
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         layout.append(scroller)
-        for margin in ("bottom", "start", "end"):
-            getattr(btnbox, f"set_margin_{margin}")(16)
         layout.append(btnbox)
         dlg.set_child(layout)
+        dlg.set_default_widget(save)
+        # Start on the first setting, not a footer button, so Enter saves.
+        dlg.set_focus(language_dd if res is None else scale_dd)
+        self._light_dismiss(dlg)
         dlg.present()
+
+    # ---- app launcher entries ---------------------------------------------
+    def _launcher_icon_path(self, session, res, cur=None):
+        cur = cur if cur is not None else session.resource_settings.get(res["id"], {})
+        name = cur.get("launcher_icon")
+        if not name or os.path.basename(name) != name:
+            return None
+        path = os.path.join(session.directory, "launcher-icons", name)
+        return path if os.path.isfile(path) else None
+
+    def _launcher_png(self, session, res, cur=None):
+        picture = self._launcher_icon_path(session, res, cur) \
+            or storage.feed_picture(res["id"], session.directory)
+        try:
+            palette = omarchy_theme.load() or {}
+        except Exception:
+            palette = {}
+        try:
+            return launchers.render_icon(res["title"], picture, palette)
+        except Exception:
+            return launchers.render_icon(res["title"], None, palette)
+
+    def _launcher_controls(self, res, session, cur):
+        """Add/remove an app launcher entry and pick its picture."""
+        portal = launchers.PortalLauncher(APP_ID)
+        file_id = launchers.desktop_file_id(APP_ID, session.id, res["id"])
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview = Gtk.Image(pixel_size=48)
+        status = create(Gtk.Label, label="", xalign=0, wrap=True)
+        status.add_css_class("tile-sub")
+        toggle = create(Gtk.Button, label="")
+        choose = create(Gtk.Button, label=tr("Choose picture…"))
+        reset = create(Gtk.Button, label=tr("Default picture"))
+        row = Gtk.Box(spacing=8)
+        row.append(preview)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                         valign=Gtk.Align.CENTER)
+        title = create(Gtk.Label, label=tr("App launcher"), xalign=0)
+        labels.append(title); labels.append(status)
+        row.append(labels)
+        row.append(toggle)
+        box.append(row)
+        pictures = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        pictures.append(reset); pictures.append(choose)
+        box.append(pictures)
+        available = portal.available()
+
+        def settings_entry():
+            return session.resource_settings.setdefault(res["id"], dict(cur))
+
+        def refresh():
+            png = self._launcher_png(session, res, session.resource_settings.get(res["id"], cur))
+            preview.set_from_paintable(Gdk.Texture.new_from_bytes(GLib.Bytes.new(png)))
+            installed = available and portal.installed(file_id)
+            bind(toggle, 'label', tr("Remove") if installed else tr("Add…"))
+            toggle.set_sensitive(available)
+            reset.set_sensitive(self._launcher_icon_path(session, res) is not None)
+            bind(status, 'text', tr("Shown in the app launcher") if installed
+                 else tr("Open this Cloud PC from the app launcher") if available
+                 else tr("The desktop portal does not offer app launcher entries"))
+            return installed
+
+        def install():
+            png = self._launcher_png(session, res)
+            def done(ok, message):
+                if ok:
+                    entry = settings_entry()
+                    entry["launcher_id"] = file_id
+                    session.save_preferences()
+                    self._set_status(tr("Added {resource} to the app launcher").format(resource=message))
+                elif message:
+                    self._error(tr("Could not add the launcher entry: {error}").format(error=message))
+                refresh()
+            portal.install(res["title"], png, file_id,
+                           lambda name: launchers.desktop_entry(APP_ID, name, session.id, res["id"]), done)
+
+        def on_toggle(*_):
+            if portal.installed(file_id):
+                portal.uninstall(file_id)
+                session.resource_settings.get(res["id"], {}).pop("launcher_id", None)
+                session.save_preferences()
+                refresh()
+            else:
+                install()
+
+        def set_picture(path):
+            directory = os.path.join(session.directory, "launcher-icons")
+            entry = settings_entry()
+            old = self._launcher_icon_path(session, res)
+            if path is None:
+                entry.pop("launcher_icon", None)
+            else:
+                os.makedirs(directory, mode=0o700, exist_ok=True)
+                name = hashlib.sha256(res["id"].encode()).hexdigest()[:16] + ".png"
+                # Store the badge-free picture as PNG, at most launcher size.
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, launchers.ICON_SIZE,
+                                                                 launchers.ICON_SIZE, True)
+                pixbuf.savev(os.path.join(directory, name), "png", [], [])
+                entry["launcher_icon"] = name
+            if path is None and old:
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+            session.save_preferences()
+            if refresh():
+                install()   # the portal confirms the new picture
+
+        def on_choose(*_):
+            dialog = Gtk.FileDialog(title=tr("Choose a picture"))
+            image_filter = Gtk.FileFilter()
+            image_filter.set_name(tr("Images"))
+            image_filter.add_pixbuf_formats()
+            filters = Gio.ListStore.new(Gtk.FileFilter)
+            filters.append(image_filter)
+            dialog.set_filters(filters)
+            def chosen(dlg, result):
+                try:
+                    file = dlg.open_finish(result)
+                except GLib.Error:
+                    return
+                try:
+                    set_picture(file.get_path())
+                except GLib.Error as error:
+                    self._error(tr("Could not read that picture: {error}").format(error=error.message))
+            dialog.open(box.get_root(), None, chosen)
+
+        toggle.connect("clicked", on_toggle)
+        choose.connect("clicked", on_choose)
+        reset.connect("clicked", lambda *_: set_picture(None))
+        refresh()
+        return box
 
     def _error(self, msg):
         def show():

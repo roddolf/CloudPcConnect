@@ -236,7 +236,7 @@ def main():
     from gi.repository import Gdk, Gio, GLib, Gtk
 
     app = Gtk.Application(
-        application_id="io.github.shakeelosmani.avd_feed_connect.SecurityKey",
+        application_id="io.github.roddolf.CloudPcConnect.SecurityKey",
         flags=Gio.ApplicationFlags.NON_UNIQUE,
     )
     result = None

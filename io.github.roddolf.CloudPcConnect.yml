@@ -1,4 +1,5 @@
-# Flatpak manifest for AVD Feed + Connect (Linux).
+# Flatpak manifest for Cloud PC Connect, a fork of AVD Feed + Connect
+# (https://github.com/shakeelosmani/avd_feed_connect) built for Omarchy.
 #
 # Bundles a purpose-built SDL3 FreeRDP client so the app connects end-to-end on
 # any machine, with two things a stock FreeRDP lacks:
@@ -9,7 +10,7 @@
 #
 # Builds and runs on GNOME 51; every source is pinned to a commit for
 # reproducibility.
-app-id: io.github.shakeelosmani.avd_feed_connect
+app-id: io.github.roddolf.CloudPcConnect
 runtime: org.gnome.Platform
 runtime-version: '51'
 sdk: org.gnome.Sdk
@@ -52,6 +53,7 @@ finish-args:
   - --filesystem=~/.local/state/omarchy/current:ro # live Omarchy theme
   - --filesystem=~/.config/omarchy/shell.toml:ro   # user shell styling overrides
   - --filesystem=~/.config/fontconfig/fonts.conf:ro # selected Omarchy font
+  - --filesystem=xdg-run/hypr:ro                   # Hyprland IPC socket: per-PC workspaces
   - --env=AVD_WEBAUTHN_NOTIFICATIONS=1
   - --env=LD_LIBRARY_PATH=/app/lib
 
@@ -309,21 +311,28 @@ modules:
       - install -Dm755 src/avd_feed_gui.py  /app/share/avd-feed-connect/avd_feed_gui.py
       - install -Dm755 fido-picker.py /app/share/avd-feed-connect/fido-picker.py
       - install -Dm755 avd-feed-connect     /app/bin/avd-feed-connect
-      - install -Dm644 io.github.shakeelosmani.avd_feed_connect.desktop
-        /app/share/applications/io.github.shakeelosmani.avd_feed_connect.desktop
-      - install -Dm644 io.github.shakeelosmani.avd_feed_connect.metainfo.xml
-        /app/share/metainfo/io.github.shakeelosmani.avd_feed_connect.metainfo.xml
-      - install -Dm644 io.github.shakeelosmani.avd_feed_connect.svg
-        /app/share/icons/hicolor/scalable/apps/io.github.shakeelosmani.avd_feed_connect.svg
-      - install -Dm644 io.github.shakeelosmani.avd_feed_connect-symbolic.svg
-        /app/share/icons/hicolor/symbolic/apps/io.github.shakeelosmani.avd_feed_connect-symbolic.svg
+      - install -Dm644 io.github.roddolf.CloudPcConnect.desktop
+        /app/share/applications/io.github.roddolf.CloudPcConnect.desktop
+      - install -Dm644 io.github.roddolf.CloudPcConnect.metainfo.xml
+        /app/share/metainfo/io.github.roddolf.CloudPcConnect.metainfo.xml
+      - install -Dm644 io.github.roddolf.CloudPcConnect.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.roddolf.CloudPcConnect.svg
+      - install -Dm644 io.github.roddolf.CloudPcConnect-symbolic.svg
+        /app/share/icons/hicolor/symbolic/apps/io.github.roddolf.CloudPcConnect-symbolic.svg
       # Tray icon dir handed to the host as IconThemePath. Quickshell loads
       # <dir>/<IconName> verbatim (no extension); other hosts add ".svg".
-      - install -Dm644 io.github.shakeelosmani.avd_feed_connect-symbolic.svg
-        /app/share/avd-feed-connect/tray/io.github.shakeelosmani.avd_feed_connect-symbolic.svg
-      - install -Dm644 io.github.shakeelosmani.avd_feed_connect-symbolic.svg
-        /app/share/avd-feed-connect/tray/io.github.shakeelosmani.avd_feed_connect-symbolic
+      - install -Dm644 io.github.roddolf.CloudPcConnect-symbolic.svg
+        /app/share/avd-feed-connect/tray/io.github.roddolf.CloudPcConnect-symbolic.svg
+      - install -Dm644 io.github.roddolf.CloudPcConnect-symbolic.svg
+        /app/share/avd-feed-connect/tray/io.github.roddolf.CloudPcConnect-symbolic
     sources:
-      - type: git
-        url: https://github.com/shakeelosmani/avd_feed_connect.git
-        commit: ddf6aa33b9fe09df5c25ff47f9e26c5613165070
+      - type: dir
+        path: .
+        skip:
+          - .flatpak-builder
+          - build-devbox
+          - build-yubikey
+          - .git
+      - type: file
+        path: src/avd_feed_connect/gui/fido_picker.py
+        dest-filename: fido-picker.py

@@ -72,6 +72,7 @@ class FeedClient:
                     continue
                 rf = _find(res, "ResourceFile")
                 icon = _find(res, "Icon32")
+                raw_icon = _find(res, "IconRaw")
                 resources.append({
                     "tenant": feed.get("TenantDisplayName", ""),
                     "tenant_id": feed.get("TenantId", ""),
@@ -82,6 +83,7 @@ class FeedClient:
                     "armpath": res.attrib.get("ArmPath", ""),
                     "rdp_url": rf.attrib.get("URL") if rf is not None else None,
                     "icon32": icon.attrib.get("FileURL") if icon is not None else None,
+                    "icon_raw": raw_icon.attrib.get("FileURL") if raw_icon is not None else None,
                 })
         return resources
 

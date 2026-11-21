@@ -1,4 +1,4 @@
-"""AVD Feed + Connect — a native Linux client for Azure Virtual Desktop.
+"""Cloud PC Connect — Windows 365 / Dev Box / AVD client for Omarchy (fork of AVD Feed + Connect).
 
 The package is split by responsibility:
 

@@ -1,48 +1,48 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.shakeelosmani.avd_feed_connect</id>
+  <id>io.github.roddolf.CloudPcConnect</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <name>AVD Feed + Connect Linux</name>
-  <summary>Connect to your Azure Virtual Desktop workspaces</summary>
+  <name>Cloud PC Connect</name>
+  <summary>Windows 365, Dev Box and Azure Virtual Desktop for Omarchy</summary>
 
-  <developer id="io.github.shakeelosmani">
-    <name>Shakeel Osmani</name>
+  <developer id="io.github.roddolf">
+    <name>Rodolfo Aguirre</name>
   </developer>
 
   <description>
     <p>
-      AVD Feed + Connect is a native Linux client for Azure Virtual Desktop
-      (AVD) and Windows 365. Sign in with your work account and it lists the
-      desktops and remote apps you are entitled to, just like the Microsoft
-      Windows App on Windows and macOS — then launches them over RDP.
+      Cloud PC Connect is a fork of AVD Feed + Connect by Shakeel Osmani,
+      built for Omarchy and Hyprland. Sign in with your work account to list
+      the Cloud PCs, Dev Boxes and remote apps you have access to, then open
+      them over RDP with the bundled FreeRDP client.
     </p>
-    <p>Features:</p>
+    <p>Changes in this fork:</p>
     <ul>
-      <li>In-app Microsoft Entra ID sign-in (interactive, so Conditional Access is honored)</li>
-      <li>Automatic workspace/resource discovery from the AVD feed</li>
-      <li>Workspace grid with the real per-resource icons</li>
-      <li>Camera and microphone redirection, and multi-monitor support</li>
-      <li>Bundles a hardened FreeRDP that survives audio-device changes mid-call</li>
+      <li>Follows the live Omarchy theme, fonts and corner radius</li>
+      <li>Cloud PCs listed first, with filters and search for the rest</li>
+      <li>Opens each Cloud PC on the Hyprland workspace you pick</li>
+      <li>Adds Cloud PCs to the app launcher with their own icon</li>
+      <li>FIDO2 security keys for sign-in and inside the remote session</li>
     </ul>
     <p>
-      This is an unofficial client and is not affiliated with or endorsed by
-      Microsoft.
+      This is an unofficial client. It is not affiliated with or endorsed by
+      Microsoft or the Omarchy project.
     </p>
   </description>
 
-  <launchable type="desktop-id">io.github.shakeelosmani.avd_feed_connect.desktop</launchable>
+  <launchable type="desktop-id">io.github.roddolf.CloudPcConnect.desktop</launchable>
 
   <screenshots>
     <screenshot type="default">
-      <caption>Your Azure Virtual Desktop workspaces</caption>
-      <image>https://raw.githubusercontent.com/shakeelosmani/avd_feed_connect/main/screenshots/workspaces.png</image>
+      <caption>Cloud PCs and remote apps</caption>
+      <image>https://raw.githubusercontent.com/roddolf/CloudPcConnect/main/screenshots/omarchy-dark.png</image>
     </screenshot>
   </screenshots>
 
-  <url type="homepage">https://github.com/shakeelosmani/avd_feed_connect</url>
-  <url type="bugtracker">https://github.com/shakeelosmani/avd_feed_connect/issues</url>
-  <url type="vcs-browser">https://github.com/shakeelosmani/avd_feed_connect</url>
+  <url type="homepage">https://github.com/roddolf/CloudPcConnect</url>
+  <url type="bugtracker">https://github.com/roddolf/CloudPcConnect/issues</url>
+  <url type="vcs-browser">https://github.com/roddolf/CloudPcConnect</url>
 
   <categories>
     <category>Network</category>

@@ -13,9 +13,9 @@ import time
 
 from .. import config
 
-# libsecret schema id — kept identical to older releases so tokens they stored
-# are still found.
-_SCHEMA_ID = "io.github.shakeelosmani.avd_feed_connect"
+# libsecret schema id. Inside Flatpak the keyring is per app, so tokens from
+# upstream AVD Feed + Connect are not reachable and need one fresh sign-in.
+_SCHEMA_ID = "io.github.roddolf.CloudPcConnect"
 
 
 class TokenStore:
@@ -50,7 +50,7 @@ class TokenStore:
         try:
             return bool(Secret.password_store_sync(
                 schema, attrs, Secret.COLLECTION_DEFAULT,
-                "AVD Feed + Connect refresh token", record_json, None))
+                "Cloud PC Connect refresh token", record_json, None))
         except Exception:
             return False
 

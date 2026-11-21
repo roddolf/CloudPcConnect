@@ -224,9 +224,10 @@ def test_connection_settings_follow_theme(app, per_resource):
     app._set_theme('dark')
     app._open_settings(owner.resources[0] if per_resource else None, owner)
     dialog = next(w for w in Gtk.Window.list_toplevels()
-                  if w.get_transient_for() is app.win and w.get_modal())
+                  if w.get_transient_for() is app.win and w.has_css_class('avd-settings'))
     try:
-        label = dialog.get_child().get_first_child().get_first_child()
+        label = next(w for w in descendants(dialog)
+                     if isinstance(w, Gtk.Label) and w.get_text() == 'Display scale')
         drain()
         dark = label.get_style_context().get_color()
         assert dark.red > 0.8 and dark.green > 0.8
@@ -848,7 +849,7 @@ def test_sign_out_clamps_unified_mode_and_keeps_remaining_account(app):
 def test_unified_alias_workspace_groups_and_refresh_are_independent(app, monkeypatch):
     a, b = add_saved(app, 'a', 'a@example.com'), add_saved(app, 'b', 'b@example.com')
     a.profile['alias'] = 'Fictional North'
-    a.resources += [dict(a.resources[0], id='second', tenant='Second workspace')]
+    a.resources += [dict(a.resources[0], id='second', tenant='Second workspace', type='RemoteApp')]
     app._select_account(a.id)
     app._set_view_mode('all')
     app._set_status('Sign in again to refresh', b)
@@ -1482,8 +1483,9 @@ def test_failed_tile_state_and_slash_filter(app):
     app._filter.set_text('BUILD')
     app._apply_filter()
     assert owner.tiles['other'].get_child_visible() and not tile.get_child_visible()
+    assert app._count_lbl.get_text() == '1 of 2'
     app._close_filter()
-    assert not app._filter.get_visible() and tile.get_child_visible()
+    assert app._filter.get_text() == '' and tile.get_child_visible()
 
 
 def test_omarchy_theme_change_restyles_live(app, monkeypatch):
@@ -1496,3 +1498,68 @@ def test_omarchy_theme_change_restyles_live(app, monkeypatch):
     app._on_omarchy_changed()
     assert app._omarchy is tokens and not app._is_dark()
     assert 'Test Mono' in app._css_provider.to_string()
+
+
+def _settings_dialog(app, owner):
+    app._open_settings(owner.resources[0], owner)
+    drain()
+    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title().startswith('Settings —'))
+    scale = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
+                 and w.get_model().get_string(0) == 'Automatic (match display)')
+    return dialog, scale
+
+
+def test_settings_dialog_escape_cancels_without_saving(app):
+    owner = add_saved(app, 'a', 'a@example.com')
+    app._select_account(owner.id)
+    dialog, scale = _settings_dialog(app, owner)
+    scale.set_selected(2)
+    keys = [c for c in dialog.observe_controllers() if isinstance(c, Gtk.EventControllerKey)]
+    from gi.repository import Gdk
+    assert any(c.emit('key-pressed', Gdk.KEY_Escape, 9, 0) for c in keys)
+    drain()
+    assert dialog not in Gtk.Window.list_toplevels()
+    assert owner.resources[0]['id'] not in owner.resource_settings
+    assert not app._open_light_dialogs()
+
+
+def test_settings_dialog_closes_on_click_outside_and_swallows_the_click(app, monkeypatch):
+    owner = add_saved(app, 'a', 'a@example.com')
+    app._select_account(owner.id)
+    dialog, scale = _settings_dialog(app, owner)
+    scale.set_selected(2)
+    launched = []
+    monkeypatch.setattr(app, '_on_tile_activated', lambda *a: launched.append(a))
+    presses = [c for c in app.win.observe_controllers() if isinstance(c, Gtk.GestureClick)
+               and c.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE]
+    for press in presses:
+        press.emit('pressed', 1, 40, 200)
+    drain()
+    assert dialog not in Gtk.Window.list_toplevels()
+    assert owner.resources[0]['id'] not in owner.resource_settings
+    assert not launched
+    # With no dialog open, presses on the main window are left alone.
+    for press in presses:
+        press.emit('pressed', 1, 40, 200)
+    assert not app._open_light_dialogs()
+
+
+def test_settings_dialog_enter_in_text_field_saves(app):
+    owner = add_saved(app, 'a', 'a@example.com')
+    app._select_account(owner.id)
+    dialog, scale = _settings_dialog(app, owner)
+    # Initial focus is the first setting, so Enter never lands on Cancel.
+    assert dialog.get_focus() is scale or scale.is_ancestor(dialog.get_focus()) or dialog.get_focus().is_ancestor(scale)
+    flags = next(w for w in descendants(dialog) if isinstance(w, Gtk.Entry)
+                 and w.get_placeholder_text().startswith('advanced:'))
+    flags.grab_focus()
+    flags.set_text('/bpp:16')
+    assert flags.get_activates_default() and dialog.get_default_widget().get_label() == 'Save'
+    assert flags.get_delegate().activate_action('default.activate', None)
+    import time
+    deadline = time.monotonic() + 2  # GtkButton.activate emits clicked after a short flash
+    while dialog in Gtk.Window.list_toplevels() and time.monotonic() < deadline:
+        GLib.MainContext.default().iteration(False)
+        time.sleep(0.01)
+    assert dialog not in Gtk.Window.list_toplevels()
+    assert owner.resource_settings[owner.resources[0]['id']]['extra_args'] == '/bpp:16'

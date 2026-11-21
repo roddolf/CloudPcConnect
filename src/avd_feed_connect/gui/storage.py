@@ -88,6 +88,43 @@ def icon_path(res_id, directory=None):
     return os.path.join(os.path.join(directory, "icons") if directory else ICON_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", res_id) + ".png")
 
 
+def large_icon_path(res_id, directory=None):
+    """The biggest picture in the feed's IconRaw .ico, saved as PNG."""
+    return icon_path(res_id, directory)[:-4] + "-large.png"
+
+
+def feed_picture(res_id, directory=None):
+    """Best cached feed picture for a resource, or None."""
+    for path in (large_icon_path(res_id, directory), icon_path(res_id, directory)):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# Flags the app now passes on every connection; a saved copy is redundant.
+BUILTIN_FLAGS = ("/dvc:rdpewa",)
+
+
+def drop_builtin_flags(text):
+    """``text`` without the flags the app adds by itself (case-insensitive)."""
+    if not isinstance(text, str):
+        return text
+    kept = [arg for arg in text.split() if arg.lower() not in BUILTIN_FLAGS]
+    return " ".join(kept)
+
+
+def tidy_extra_args(entries):
+    """Drop built-in flags from every entry's ``extra_args``; True if any changed."""
+    changed = False
+    for entry in entries.values() if isinstance(entries, dict) else ():
+        if isinstance(entry, dict) and isinstance(entry.get("extra_args"), str):
+            tidy = drop_builtin_flags(entry["extra_args"])
+            if tidy != entry["extra_args"]:
+                entry["extra_args"] = tidy
+                changed = True
+    return changed
+
+
 def load_settings():
     try:
         with open(SETTINGS_FILE) as f:

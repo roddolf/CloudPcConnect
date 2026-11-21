@@ -121,12 +121,21 @@ box.linked > button:not(:first-child) { border-left-width:0; }
   color:@avd_accent_ink; font-weight:bold; }
 
 .section-h { font-weight:bold; font-size:${fs_caption}px; letter-spacing:1px; color:@avd_muted; }
+.section-count { font-size:${fs_caption}px; color:@avd_faint; }
+.subsection-h { font-size:${fs_small}px; color:@avd_muted; }
+separator.subsection-rule { background:@avd_border; min-height:1px; }
 .count { font-size:${fs_small}px; color:@avd_faint; }
 entry.filter { min-height:24px; padding:0 8px; font-size:${fs_small}px; color:@avd_ink;
-  background:alpha(@avd_ink,$fill); border:1px solid @avd_focus; border-radius:${r}px;
+  background:alpha(@avd_ink,$fill); border:1px solid alpha(@avd_ink,$border); border-radius:${r}px;
   box-shadow:none; outline:none; caret-color:@avd_accent; }
+entry.filter:focus-within { border-color:@avd_focus; }
 entry.filter image { color:@avd_faint; }
 entry.filter > text > placeholder { color:@avd_faint; }
+dropdown.facet > button { min-height:24px; padding:0 8px; font-size:${fs_small}px; color:@avd_muted;
+  background:alpha(@avd_ink,$fill); border:1px solid alpha(@avd_ink,$border); border-radius:${r}px;
+  box-shadow:none; }
+dropdown.facet > button:hover { background:alpha(@avd_ink,$hover); color:@avd_ink; }
+dropdown.facet > button:checked { background:alpha(@avd_ink,$selected); color:@avd_accent_ink; }
 
 flowbox, flowboxchild { background:none; padding:0; border:none; box-shadow:none; outline:none; }
 flowboxchild:selected, flowboxchild:focus, flowboxchild:active { background:none; }
@@ -221,6 +230,16 @@ window.avd-settings listview row:selected { background:alpha(@avd_ink,$selected)
 .settings-title { font-weight:bold; font-size:${fs_heading}px; color:@avd_ink; }
 .settings-sub { font-size:${fs_small}px; color:@avd_muted; }
 .field-label { font-weight:bold; font-size:${fs_caption}px; letter-spacing:0.6px; color:@avd_muted; }
+window.avd-settings .settings-foot { border-top:1px solid @avd_border; padding:12px 22px; }
+window.avd-settings .settings-subpanel { border-left:1px solid @avd_border; padding-left:12px; }
+window.avd-settings scrolledwindow, window.avd-settings viewport { background:none; }
+window.avd-settings dropdown > button, window.avd-settings entry { min-height:28px; padding-top:0;
+  padding-bottom:0; }
+window.avd-settings .settings-foot button { min-height:28px; padding:0 16px; }
+window.avd-settings headerbar.avd-header windowcontrols button { border:1px solid transparent;
+  background:none; min-width:24px; min-height:24px; padding:0; }
+window.avd-settings headerbar.avd-header windowcontrols button:hover { background:alpha(@avd_ink,$hover);
+  border-color:alpha(@avd_ink,$hover_border); }
 
 /* Menus mirror Omarchy's menu card: theme background, 2px border, no shadow. */
 popover.avd-menu { background:none; box-shadow:none; }

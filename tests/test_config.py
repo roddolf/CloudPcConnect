@@ -146,3 +146,12 @@ def test_with_login_hint_names_the_signed_in_account_once():
     assert config.with_login_hint(base, "") == base
     evil = "https://evil.example/authorize?client_id=x"
     assert config.with_login_hint(evil, "ana@contoso.com") == evil
+
+
+def test_builtin_flags_are_dropped_from_saved_extra_args():
+    from avd_feed_connect.gui import storage
+    entries = {'a': {'extra_args': '/smartcard /DVC:rdpewa'}, 'b': {'extra_args': '/dvc:rdpewa'},
+               'c': {'scale': 'auto'}}
+    assert storage.tidy_extra_args(entries)
+    assert entries['a']['extra_args'] == '/smartcard' and entries['b']['extra_args'] == ''
+    assert not storage.tidy_extra_args(entries)

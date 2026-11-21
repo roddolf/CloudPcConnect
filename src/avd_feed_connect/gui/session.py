@@ -30,6 +30,11 @@ class AccountSession:
                 self.resource_settings = json.load(source)
         except (OSError, ValueError):
             self.resource_settings = {}
+        if storage.tidy_extra_args(self.resource_settings):
+            try:
+                self.save_preferences()
+            except OSError:
+                pass
         try:
             with open(os.path.join(directory, 'auth-modes.json')) as source:
                 self.auth_modes = json.load(source)

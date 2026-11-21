@@ -1,1 +1,1 @@
-"""GTK4 desktop UI for AVD Feed + Connect."""
+"""GTK4 desktop UI for Cloud PC Connect."""

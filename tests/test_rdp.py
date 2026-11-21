@@ -6,6 +6,27 @@ from avd_feed_connect.rdp.resources import (
     set_rdp_dynamic_resolution, rdp_is_remoteapp, set_rdp_desktop_mode)
 
 
+def test_private_freerdp_arguments_hide_token_from_command():
+    import os
+    from avd_feed_connect.rdp.launcher import private_argument_file
+
+    argv = ["sdl-freerdp", "/tmp/file with spaces.rdp", "/gateway:type:arm,bearer:secret"]
+    command, fd = private_argument_file(argv)
+    try:
+        assert "secret" not in " ".join(command)
+        assert os.read(fd, 4096).decode().splitlines() == argv[1:]
+    finally:
+        os.close(fd)
+
+
+def test_private_freerdp_arguments_reject_newlines():
+    import pytest
+    from avd_feed_connect.rdp.launcher import private_argument_file
+
+    with pytest.raises(ValueError):
+        private_argument_file(["sdl-freerdp", "/u:user\n/cert:ignore"])
+
+
 def test_dynamic_display_settings_in_freerdp(tmp_path):
     import ctypes
     import os
@@ -141,6 +162,15 @@ def test_argv_cert_ignore_opt_out(tmp_path, monkeypatch):
     argv = build_argv("sdl-freerdp", _rdp(tmp_path, "enablerdsaadauth:i:1\n"), "")
     assert "/cert:ignore" in argv
     assert "/cert:tofu" not in argv
+
+
+def test_security_keys_are_redirected_unless_the_rdp_disables_it(tmp_path):
+    from avd_feed_connect.rdp.launcher import webauthn_args
+
+    feed = _rdp(tmp_path, "enablerdsaadauth:i:1\n")
+    assert "/dvc:rdpewa" in build_argv("sdl-freerdp", feed, "")
+    assert webauthn_args(feed, ["/dvc:rdpewa"]) == []
+    assert webauthn_args(_rdp(tmp_path, "redirectwebauthn:i:0\n")) == []
 
 
 def _rdp(tmp_path, body):

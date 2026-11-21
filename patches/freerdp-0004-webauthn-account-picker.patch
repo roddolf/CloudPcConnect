@@ -1,0 +1,1037 @@
+diff --git i/channels/rdpewa/client/rdpewa_fido.c w/channels/rdpewa/client/rdpewa_fido.c
+index 0f89315..f5b515d 100644
+--- i/channels/rdpewa/client/rdpewa_fido.c
++++ w/channels/rdpewa/client/rdpewa_fido.c
+@@ -30,6 +30,7 @@
+ #include <winpr/assert.h>
+ #include <winpr/endian.h>
+ #include <winpr/wlog.h>
++#include <winpr/string.h>
+ 
+ #include <freerdp/channels/log.h>
+ #include <freerdp/channels/rdpewa.h>
+@@ -57,15 +58,71 @@ typedef struct
+ 	int result;
+ } RDPEWA_FIDO_ASYNC;
+ 
+-static bool rdpewa_fido_get_pin(rdpContext* context, char** pin)
++/** @brief PIN prompts per request; a key blocks PIN use after three wrong PINs in a row anyway */
++#define RDPEWA_FIDO_PIN_ATTEMPTS 3
++
++/** @brief Longest relying party id passed on to the user interface (a DNS name) */
++#define RDPEWA_FIDO_SITE_MAX 253
++
++/** @brief The request ended without an answer for the server (session closing, no thread) */
++#define RDPEWA_FIDO_ABORTED (-1000)
++
++/**
++ * Copy a relying party id that is safe to show and to pass on as a single
++ * argument: a non-empty DNS name of [A-Za-z0-9.-], else "-".
++ */
++static void rdpewa_fido_site(char* dest, size_t size, const char* rpId)
++{
++	WINPR_ASSERT(dest);
++	WINPR_ASSERT(size >= 2);
++
++	const size_t limit = (size - 1 < RDPEWA_FIDO_SITE_MAX) ? size - 1 : RDPEWA_FIDO_SITE_MAX;
++	const size_t length = rpId ? strnlen(rpId, limit + 1) : 0;
++	bool valid = (length > 0) && (length <= limit);
++	for (size_t i = 0; valid && i < length; i++)
++	{
++		const char c = rpId[i];
++		valid = ((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) ||
++		        ((c >= '0') && (c <= '9')) || (c == '.') || (c == '-');
++	}
++
++	if (valid)
++	{
++		memcpy(dest, rpId, length);
++		dest[length] = '\0';
++	}
++	else
++	{
++		dest[0] = '-';
++		dest[1] = '\0';
++	}
++}
++
++/**
++ * Ask the user for the PIN through AuthenticateEx(AUTH_FIDO_PIN). The username
++ * field carries the relying party the PIN is for, and after a wrong PIN the
++ * domain field carries the retries left ("wrong" when the key did not say).
++ * Clients that do not know these hints only read the password.
++ */
++static bool rdpewa_fido_get_pin(rdpContext* context, const char* site, bool wrong, int retries,
++                                char** pin)
+ {
+ 	WINPR_ASSERT(pin);
+ 	*pin = nullptr;
+ 
+ 	freerdp* instance = context->instance;
+-	char* u = nullptr;
++	char* u = (site && (strcmp(site, "-") != 0)) ? _strdup(site) : nullptr;
+ 	char* p = nullptr;
+ 	char* d = nullptr;
++	if (wrong)
++	{
++		char text[16] = WINPR_C_ARRAY_INIT;
++		if (retries >= 0)
++			(void)_snprintf(text, sizeof(text), "%d", retries);
++		else
++			(void)_snprintf(text, sizeof(text), "wrong");
++		d = _strdup(text);
++	}
+ 	const bool rc = instance && instance->AuthenticateEx &&
+ 	                instance->AuthenticateEx(instance, &u, &p, &d, AUTH_FIDO_PIN) && p;
+ 	free(u);
+@@ -125,14 +182,143 @@ static bool notifyWait(rdpContext* context, HANDLE ft, fido_dev_t* dev)
+ 	const UINT64 id = winpr_GetTickCount64NS();
+ 	(void)notify(context, id, false);
+ 	const DWORD status = WaitForMultipleObjects(ARRAYSIZE(hdl), hdl, FALSE, INFINITE);
+-	CloseHandle(ft);
+ 	(void)notify(context, id, true);
+ 
+ 	const bool rc = (status == WAIT_OBJECT_0);
+ 	if (!rc)
++	{
+ 		fido_dev_cancel(dev);
++		WaitForSingleObject(ft, INFINITE);
++	}
++	CloseHandle(ft);
+ 	return rc;
+ }
++
++/**
++ * Run one FIDO operation on a worker thread and ask for the PIN as the key needs
++ * it: a wrong PIN is asked for again with the retries left (up to
++ * RDPEWA_FIDO_PIN_ATTEMPTS prompts), and failed built-in user verification
++ * falls back to the PIN.
++ *
++ * @return the libfido2 result, FIDO_ERR_KEEPALIVE_CANCEL when the user dismissed
++ *         the PIN prompt, or RDPEWA_FIDO_ABORTED when the session is closing.
++ */
++static int rdpewa_fido_run(rdpContext* context, fido_dev_t* dev, RDPEWA_FIDO_ASYNC* fta,
++                           LPTHREAD_START_ROUTINE worker, bool uv, const char* site)
++{
++	WINPR_ASSERT(fta);
++
++	const bool useUv = uv && fido_dev_has_uv(dev);
++	bool needPin = fido_dev_has_pin(dev) && !useUv;
++	bool wrong = false;
++	int retries = -1;
++	size_t prompts = 0;
++
++	for (;;)
++	{
++		char* pin = nullptr;
++		if (needPin)
++		{
++			if (!rdpewa_fido_get_pin(context, site, wrong, retries, &pin))
++				return FIDO_ERR_KEEPALIVE_CANCEL;
++			prompts++;
++		}
++
++		fta->pin = pin;
++		fta->result = FIDO_ERR_INTERNAL;
++		HANDLE ft = CreateThread(nullptr, 0, worker, fta, 0, nullptr);
++		const bool finished = notifyWait(context, ft, dev);
++		fta->pin = nullptr;
++		winpr_zfree(pin);
++		if (!finished)
++			return RDPEWA_FIDO_ABORTED;
++
++		const int r = fta->result;
++		if (!needPin && useUv && rdpewa_fido_uv_failed(r) && fido_dev_has_pin(dev))
++		{
++			needPin = true;
++			continue;
++		}
++
++		if (needPin && (r == FIDO_ERR_PIN_INVALID) && (prompts < RDPEWA_FIDO_PIN_ATTEMPTS))
++		{
++			wrong = true;
++			if ((fido_dev_get_retry_count(dev, &retries) != FIDO_OK) || (retries < 0))
++				retries = -1;
++			if (retries == 0)
++				return FIDO_ERR_PIN_BLOCKED;
++			continue;
++		}
++		return r;
++	}
++}
++
++static const char* rdpewa_fido_error_text(int r)
++{
++	switch (r)
++	{
++		case FIDO_ERR_NO_CREDENTIALS:
++			return "This security key has no passkey for this site.";
++		case FIDO_ERR_PIN_INVALID:
++			return "Wrong security key PIN.";
++		case FIDO_ERR_PIN_BLOCKED:
++			return "The security key PIN is blocked. Reset the key to use it again.";
++		case FIDO_ERR_PIN_AUTH_BLOCKED:
++			return "Too many wrong PINs. Remove and reinsert the security key.";
++		case FIDO_ERR_PIN_NOT_SET:
++		case FIDO_ERR_PIN_REQUIRED:
++			return "Set a PIN on the security key first.";
++		case FIDO_ERR_UV_BLOCKED:
++		case FIDO_ERR_UV_INVALID:
++			return "The security key could not verify you.";
++		case FIDO_ERR_USER_ACTION_TIMEOUT:
++		case FIDO_ERR_ACTION_TIMEOUT:
++			return "The security key was not touched in time.";
++		case FIDO_ERR_CREDENTIAL_EXCLUDED:
++			return "This security key is already registered.";
++		case FIDO_ERR_OPERATION_DENIED:
++		case FIDO_ERR_NOT_ALLOWED:
++			return "The security key denied the request.";
++		default:
++			return "The security key request failed.";
++	}
++}
++
++/**
++ * Tell the user why a request failed. The message is
++ * "rdpewa-error:<libfido2 code>:<site>:<English text>" so a client can show its
++ * own wording; dismissing a prompt is not an error.
++ */
++static void rdpewa_fido_report(rdpContext* context, int r, const char* site)
++{
++	if ((r == FIDO_OK) || (r == FIDO_ERR_KEEPALIVE_CANCEL) || (r == RDPEWA_FIDO_ABORTED))
++		return;
++
++	char message[RDPEWA_FIDO_SITE_MAX + 128] = WINPR_C_ARRAY_INIT;
++	(void)_snprintf(message, sizeof(message), "rdpewa-error:%d:%s:%s", r, site ? site : "-",
++	                rdpewa_fido_error_text(r));
++
++	UserNotificationEventArgs e = WINPR_C_ARRAY_INIT;
++	EventArgsInit(&e, RDPEWA_CHANNEL_NAME);
++	e.message = message;
++	e.timeoutMS = 10000;
++	e.messageID = winpr_GetTickCount64NS();
++	if (PubSub_OnUserNotification(context->pubSub, context, &e) < 0)
++		WLog_WARN(TAG, "Could not report the security key failure to the client");
++}
++
++/**
++ * Answer a request that the authenticator (or the user) turned down. The RPC
++ * itself succeeded, so per [MS-RDPEWA] it returns S_OK with the CTAP status as
++ * the first response byte, which lets Windows explain the failure. Local
++ * failures without a CTAP status stay E_FAIL.
++ */
++static wStream* rdpewa_fido_error_response(int r, const RDPEWA_DEVICE_INFO* devInfo)
++{
++	if ((r > FIDO_OK) && (r <= UINT8_MAX))
++		return rdpewa_cbor_encode_webauthn_response(S_OK, (BYTE)r, nullptr, 0, devInfo);
++	return rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, devInfo);
++}
+ /**
+  * Select a device by making all available keys blink and waiting for the user to touch one.
+  * Uses fido_dev_get_touch_begin/fido_dev_get_touch_status for non-blocking multi-device selection.
+@@ -163,6 +349,8 @@ static int rdpewa_fido_select_device(rdpContext* context, fido_dev_t** devs, siz
+ 	int iterations = timeout_sec * 5; /* 200ms * 5 = 1 second */
+ 	for (int iter = 0; iter < iterations && selected < 0; iter++)
+ 	{
++		if (WaitForSingleObject(freerdp_abort_event(context), 0) == WAIT_OBJECT_0)
++			break;
+ 		for (size_t i = 0; i < ndevs; i++)
+ 		{
+ 			if (!devs[i])
+@@ -183,6 +371,61 @@ static int rdpewa_fido_select_device(rdpContext* context, fido_dev_t** devs, siz
+ 	return selected;
+ }
+ 
++static bool rdpewa_fido_account_label(char* dest, size_t size, const char* value)
++{
++	if (!value || !value[0] || strnlen(value, size) >= size ||
++	    ConvertUtf8ToWChar(value, nullptr, 0) < 0)
++		return false;
++	size_t i = 0;
++	for (; value[i]; i++)
++		dest[i] = ((unsigned char)value[i] < 0x20 || value[i] == 0x7f) ? ' ' : value[i];
++	dest[i] = '\0';
++	return true;
++}
++
++static bool rdpewa_fido_choose_assertion(rdpContext* context, const fido_assert_t* assert,
++                                         size_t* selected)
++{
++	const size_t count = fido_assert_count(assert);
++	if (count == 0 || count > 128 || !selected)
++		return false;
++	*selected = 0;
++	if (count == 1)
++		return true;
++	if (!context || !context->instance || !context->instance->ChooseFidoCredential)
++		return false;
++
++	char** labels = calloc(count, sizeof(*labels));
++	if (!labels)
++		return false;
++	bool ok = false;
++	for (size_t i = 0; i < count; i++)
++	{
++		char name[241] = { 0 };
++		char display[241] = { 0 };
++		const bool hasName = rdpewa_fido_account_label(
++		    name, sizeof(name), fido_assert_user_name(assert, i));
++		const bool hasDisplay = rdpewa_fido_account_label(
++		    display, sizeof(display), fido_assert_user_display_name(assert, i));
++		labels[i] = calloc(1, 520);
++		if (!labels[i])
++			goto out;
++		if (hasName && hasDisplay && strcmp(name, display) != 0)
++			snprintf(labels[i], 520, "%s - %s", display, name);
++		else if (hasName || hasDisplay)
++			snprintf(labels[i], 520, "%s", hasName ? name : display);
++		else
++			snprintf(labels[i], 520, "Account %" PRIuz " (name unavailable)", i + 1);
++	}
++	ok = context->instance->ChooseFidoCredential(context->instance, (const char* const*)labels,
++	                                              count, selected) && *selected < count;
++out:
++	for (size_t i = 0; i < count; i++)
++		free(labels[i]);
++	free(labels);
++	return ok;
++}
++
+ /**
+  * Populate device info from an open FIDO device.
+  */
+@@ -318,6 +561,7 @@ static wStream* rdpewa_fido_make_credential(rdpContext* context, const BYTE* cta
+ 	fido_cred_t* cred = nullptr;
+ 	wStream* ret = nullptr;
+ 	bool uv = false;
++	char site[RDPEWA_FIDO_SITE_MAX + 1] = WINPR_C_ARRAY_INIT;
+ 
+ 	WINPR_ASSERT(ctapData);
+ 
+@@ -602,51 +846,19 @@ static wStream* rdpewa_fido_make_credential(rdpContext* context, const BYTE* cta
+ 	}
+ 
+ 	{
+-		char* pin = nullptr;
+-		const bool useUv = uv && fido_dev_has_uv(dev);
+-		if (fido_dev_has_pin(dev) && !useUv && !rdpewa_fido_get_pin(context, &pin))
+-		{
+-			ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
+-			goto out;
+-		}
+-
+-		/* Run fido in background (key starts blinking), notify via PubSub */
+-		RDPEWA_FIDO_ASYNC fta = { dev, cred, nullptr, pin, FIDO_ERR_INTERNAL };
+-		HANDLE ft = CreateThread(nullptr, 0, rdpewa_fido_makecred_thread, &fta, 0, nullptr);
+-		if (!notifyWait(context, ft, dev))
+-		{
+-			winpr_zfree(pin);
+-			goto out;
+-		}
+-
+-		r = fta.result;
+-		winpr_zfree(pin);
+-
+-		if (useUv && rdpewa_fido_uv_failed(r) && fido_dev_has_pin(dev))
+-		{
+-			if (!rdpewa_fido_get_pin(context, &pin))
+-			{
+-				ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
+-				goto out;
+-			}
+-
+-			fta.pin = pin;
+-			fta.result = FIDO_ERR_INTERNAL;
+-			ft = CreateThread(nullptr, 0, rdpewa_fido_makecred_thread, &fta, 0, nullptr);
+-			if (!notifyWait(context, ft, dev))
+-			{
+-				winpr_zfree(pin);
+-				goto out;
+-			}
+-			r = fta.result;
+-			winpr_zfree(pin);
+-		}
++		RDPEWA_FIDO_ASYNC fta = { dev, cred, nullptr, nullptr, FIDO_ERR_INTERNAL };
++		rdpewa_fido_site(site, sizeof(site), fido_cred_rp_id(cred));
++		r = rdpewa_fido_run(context, dev, &fta, rdpewa_fido_makecred_thread, uv, site);
+ 	}
+ 
++	if (r == RDPEWA_FIDO_ABORTED)
++		goto out;
++
+ 	if (r != FIDO_OK)
+ 	{
+-		WLog_ERR(TAG, "fido_dev_make_cred failed: %s", fido_strerr(r));
+-		ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
++		WLog_WARN(TAG, "fido_dev_make_cred failed for %s: %s", site, fido_strerr(r));
++		rdpewa_fido_report(context, r, site);
++		ret = rdpewa_fido_error_response(r, &devInfo);
+ 		goto out;
+ 	}
+ 
+@@ -768,6 +980,8 @@ static wStream* rdpewa_fido_get_assertion(rdpContext* context, const BYTE* ctapD
+ 	fido_assert_t* assert = nullptr;
+ 	wStream* ret = nullptr;
+ 	bool uv = false;
++	size_t allowed = 0;
++	char site[RDPEWA_FIDO_SITE_MAX + 1] = WINPR_C_ARRAY_INIT;
+ 
+ 	WINPR_ASSERT(ctapData);
+ 
+@@ -838,6 +1052,7 @@ static wStream* rdpewa_fido_get_assertion(rdpContext* context, const BYTE* ctapD
+ 									fido_assert_allow_cred(
+ 									    assert, cbor_bytestring_handle(cdPairs[m].value),
+ 									    cbor_bytestring_length(cdPairs[m].value));
++									allowed++;
+ 								}
+ 							}
+ 						}
+@@ -940,76 +1155,46 @@ static wStream* rdpewa_fido_get_assertion(rdpContext* context, const BYTE* ctapD
+ 	}
+ 
+ 	{
+-		char* pin = nullptr;
+-		const bool useUv = uv && fido_dev_has_uv(dev);
+-		if (fido_dev_has_pin(dev) && !useUv && !rdpewa_fido_get_pin(context, &pin))
+-		{
+-			ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
+-			goto out;
+-		}
+-
+-		/* Run fido in background (key starts blinking), show prompt on this thread */
+-		RDPEWA_FIDO_ASYNC fta = { dev, nullptr, assert, pin, FIDO_ERR_INTERNAL };
+-		HANDLE ft = CreateThread(nullptr, 0, rdpewa_fido_getassert_thread, &fta, 0, nullptr);
+-		if (!notifyWait(context, ft, dev))
+-		{
+-			winpr_zfree(pin);
+-			goto out;
+-		}
+-
+-		r = fta.result;
+-		winpr_zfree(pin);
+-
+-		if (useUv && rdpewa_fido_uv_failed(r) && fido_dev_has_pin(dev))
+-		{
+-			if (!rdpewa_fido_get_pin(context, &pin))
+-			{
+-				ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
+-				goto out;
+-			}
+-
+-			fta.pin = pin;
+-			fta.result = FIDO_ERR_INTERNAL;
+-			ft = CreateThread(nullptr, 0, rdpewa_fido_getassert_thread, &fta, 0, nullptr);
+-			if (!notifyWait(context, ft, dev))
+-			{
+-				winpr_zfree(pin);
+-				goto out;
+-			}
+-			r = fta.result;
+-			winpr_zfree(pin);
+-		}
++		RDPEWA_FIDO_ASYNC fta = { dev, nullptr, assert, nullptr, FIDO_ERR_INTERNAL };
++		rdpewa_fido_site(site, sizeof(site), fido_assert_rp_id(assert));
++		r = rdpewa_fido_run(context, dev, &fta, rdpewa_fido_getassert_thread, uv, site);
+ 	}
+ 
++	if (r == RDPEWA_FIDO_ABORTED)
++		goto out;
++
+ 	if (r != FIDO_OK)
+ 	{
+-		WLog_ERR(TAG, "fido_dev_get_assert failed: %s", fido_strerr(r));
+-		ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
++		WLog_WARN(TAG, "fido_dev_get_assert failed for %s (%" PRIuz " allowed credentials): %s",
++		          site, allowed, fido_strerr(r));
++		rdpewa_fido_report(context, r, site);
++		ret = rdpewa_fido_error_response(r, &devInfo);
+ 		goto out;
+ 	}
+ 
+-	if (fido_assert_count(assert) == 0)
++	size_t selected = 0;
++	if (!rdpewa_fido_choose_assertion(context, assert, &selected))
+ 	{
+-		ret = rdpewa_cbor_encode_webauthn_response(E_FAIL, 0x01, nullptr, 0, &devInfo);
++		ret = rdpewa_fido_error_response(FIDO_ERR_KEEPALIVE_CANCEL, &devInfo);
+ 		goto out;
+ 	}
+ 
+ 	/* Encode CTAP assertion response as CBOR map with integer keys per FIDO CTAP section 6.2 */
+ 	size_t nkeys = 3; /* credential(1) + authData(2) + signature(3) */
+-	if (fido_assert_user_id_len(assert, 0) > 0)
++	if (fido_assert_user_id_len(assert, selected) > 0)
+ 		nkeys = 4; /* + user(4) */
+ 	cbor_item_t* respMap = cbor_new_definite_map(nkeys);
+ 	if (!respMap)
+ 		goto out;
+ 
+ 	/* key 1: credential {id, type} */
+-	if (fido_assert_id_len(assert, 0) > 0)
++	if (fido_assert_id_len(assert, selected) > 0)
+ 	{
+ 		cbor_item_t* credKey = cbor_build_uint8(1);
+ 		cbor_item_t* credMap = cbor_new_definite_map(2);
+ 		cbor_item_t* cidKey = cbor_build_string("id");
+ 		cbor_item_t* cidVal =
+-		    cbor_build_bytestring(fido_assert_id_ptr(assert, 0), fido_assert_id_len(assert, 0));
++		    cbor_build_bytestring(fido_assert_id_ptr(assert, selected), fido_assert_id_len(assert, selected));
+ 		cbor_item_t* ctypeKey = cbor_build_string("type");
+ 		cbor_item_t* ctypeVal = cbor_build_string("public-key");
+ 
+@@ -1037,8 +1222,8 @@ static wStream* rdpewa_fido_get_assertion(rdpContext* context, const BYTE* ctapD
+ 
+ 	/* key 2: authData (raw) */
+ 	cbor_item_t* adKey = cbor_build_uint8(2);
+-	cbor_item_t* adVal = cbor_build_bytestring(fido_assert_authdata_raw_ptr(assert, 0),
+-	                                           fido_assert_authdata_raw_len(assert, 0));
++	cbor_item_t* adVal = cbor_build_bytestring(fido_assert_authdata_raw_ptr(assert, selected),
++	                                           fido_assert_authdata_raw_len(assert, selected));
+ 	if (!cbor_map_add(respMap, (struct cbor_pair){ .key = adKey, .value = adVal }))
+ 	{
+ 		cbor_decref(&adKey);
+@@ -1052,7 +1237,7 @@ static wStream* rdpewa_fido_get_assertion(rdpContext* context, const BYTE* ctapD
+ 	/* key 3: signature */
+ 	cbor_item_t* sigKey = cbor_build_uint8(3);
+ 	cbor_item_t* sigVal =
+-	    cbor_build_bytestring(fido_assert_sig_ptr(assert, 0), fido_assert_sig_len(assert, 0));
++	    cbor_build_bytestring(fido_assert_sig_ptr(assert, selected), fido_assert_sig_len(assert, selected));
+ 	if (!cbor_map_add(respMap, (struct cbor_pair){ .key = sigKey, .value = sigVal }))
+ 	{
+ 		cbor_decref(&sigKey);
+@@ -1064,13 +1249,13 @@ static wStream* rdpewa_fido_get_assertion(rdpContext* context, const BYTE* ctapD
+ 	cbor_decref(&sigVal);
+ 
+ 	/* key 4: user -- id only */
+-	if (fido_assert_user_id_len(assert, 0) > 0)
++	if (fido_assert_user_id_len(assert, selected) > 0)
+ 	{
+ 		cbor_item_t* uKey = cbor_build_uint8(4);
+ 		cbor_item_t* uMap = cbor_new_definite_map(1);
+ 		cbor_item_t* uidKey = cbor_build_string("id");
+-		cbor_item_t* uidVal = cbor_build_bytestring(fido_assert_user_id_ptr(assert, 0),
+-		                                            fido_assert_user_id_len(assert, 0));
++		cbor_item_t* uidVal = cbor_build_bytestring(fido_assert_user_id_ptr(assert, selected),
++		                                            fido_assert_user_id_len(assert, selected));
+ 
+ 		if (!cbor_map_add(uMap, (struct cbor_pair){ .key = uidKey, .value = uidVal }))
+ 		{
+diff --git i/client/SDL/SDL3/dialogs/sdl_dialogs.cpp w/client/SDL/SDL3/dialogs/sdl_dialogs.cpp
+index 7ce1a54..ae65ab8 100644
+--- i/client/SDL/SDL3/dialogs/sdl_dialogs.cpp
++++ w/client/SDL/SDL3/dialogs/sdl_dialogs.cpp
+@@ -20,6 +20,19 @@
+ #include <vector>
+ #include <string>
+ #include <cassert>
++#include <atomic>
++#include <cerrno>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <new>
++#include <arpa/inet.h>
++#include <poll.h>
++#include <signal.h>
++#include <spawn.h>
++#include <sys/socket.h>
++#include <sys/wait.h>
++#include <unistd.h>
+ 
+ #include <freerdp/log.h>
+ #include <freerdp/utils/passphrase.h>
+@@ -85,12 +98,130 @@ static int sdl_show_dialog(rdpContext* context, const char* title, const char* m
+ 	return event.user.code;
+ }
+ 
++static bool sdl_fido_dialog(freerdp* instance, const char* const* labels, size_t count,
++                            bool pin, std::vector<char>& response, const char* site = nullptr,
++                            const char* retries = nullptr);
++
++/* Hints passed to the PIN prompt must stay single, harmless arguments. */
++static bool sdl_fido_site_valid(const char* site)
++{
++	if (!site)
++		return false;
++	const size_t length = strnlen(site, 254);
++	if (length == 0 || length > 253)
++		return false;
++	for (size_t i = 0; i < length; i++)
++	{
++		const char c = site[i];
++		if (!(((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) ||
++		      ((c >= '0') && (c <= '9')) || (c == '.') || (c == '-')))
++			return false;
++	}
++	return true;
++}
++
++static bool sdl_fido_retries_valid(const char* retries)
++{
++	if (!retries)
++		return false;
++	if (strcmp(retries, "wrong") == 0)
++		return true;
++	const size_t length = strnlen(retries, 4);
++	if (length == 0 || length > 3)
++		return false;
++	for (size_t i = 0; i < length; i++)
++	{
++		if ((retries[i] < '0') || (retries[i] > '9'))
++			return false;
++	}
++	return true;
++}
++
++struct FidoKeyboardGrab
++{
++	std::atomic<bool> ready{ false };
++	SDL_WindowID window = 0;
++	bool grabbed = false;
++};
++
++static bool sdl_fido_release_keyboard(rdpContext* context,
++                                      const std::shared_ptr<FidoKeyboardGrab>& state)
++{
++	auto holder = std::unique_ptr<std::shared_ptr<FidoKeyboardGrab>>(
++	    new (std::nothrow) std::shared_ptr<FidoKeyboardGrab>(state));
++	if (!holder)
++		return false;
++	if (!SDL_RunOnMainThread(
++	        [](void* data) {
++		        std::unique_ptr<std::shared_ptr<FidoKeyboardGrab>> owned(
++		            static_cast<std::shared_ptr<FidoKeyboardGrab>*>(data));
++		        auto window = SDL_GetKeyboardFocus();
++		        if (window && SDL_GetWindowKeyboardGrab(window))
++		        {
++			        (*owned)->window = SDL_GetWindowID(window);
++			        (*owned)->grabbed = SDL_SetWindowKeyboardGrab(window, false);
++		        }
++		        (*owned)->ready = true;
++	        },
++	        holder.get(), false))
++		return false;
++	holder.release();
++	while (!state->ready)
++	{
++		if (freerdp_shall_disconnect_context(context))
++			return false;
++		Sleep(10);
++	}
++	return true;
++}
++
++static void sdl_fido_restore_keyboard(const std::shared_ptr<FidoKeyboardGrab>& state)
++{
++	if (!state->grabbed)
++		return;
++	auto holder = std::unique_ptr<std::shared_ptr<FidoKeyboardGrab>>(
++	    new (std::nothrow) std::shared_ptr<FidoKeyboardGrab>(state));
++	if (!holder)
++		return;
++	if (SDL_RunOnMainThread(
++	        [](void* data) {
++		        std::unique_ptr<std::shared_ptr<FidoKeyboardGrab>> owned(
++		            static_cast<std::shared_ptr<FidoKeyboardGrab>*>(data));
++		        auto window = SDL_GetWindowFromID((*owned)->window);
++		        if (window && SDL_GetKeyboardFocus() == window)
++			        SDL_SetWindowKeyboardGrab(window, true);
++	        },
++	        holder.get(), false))
++		holder.release();
++}
++
+ BOOL sdl_authenticate_ex(freerdp* instance, char** username, char** password, char** domain,
+                          rdp_auth_reason reason)
+ {
+ 	SDL_Event event = {};
+ 	BOOL res = FALSE;
+ 
++	if (reason == AUTH_FIDO_PIN)
++	{
++		if (!instance || !instance->context || !password)
++			return FALSE;
++		if (*password)
++			return TRUE;
++		std::vector<char> pin;
++		const bool ok = sdl_fido_dialog(instance, nullptr, 0, true, pin,
++		                                username ? *username : nullptr, domain ? *domain : nullptr);
++		if (ok && !pin.empty() && pin.size() <= 256 &&
++		    !memchr(pin.data(), '\0', pin.size()))
++		{
++			*password = static_cast<char*>(calloc(pin.size() + 1, 1));
++			if (*password)
++				memcpy(*password, pin.data(), pin.size());
++		}
++		if (!pin.empty())
++			SecureZeroMemory(pin.data(), pin.size());
++		return *password != nullptr;
++	}
++
+ 	const char* target = freerdp_settings_get_server_name(instance->context->settings);
+ 	switch (reason)
+ 	{
+@@ -227,6 +358,192 @@ BOOL sdl_choose_smartcard(freerdp* instance, SmartcardCertInfo** cert_list, DWOR
+ 	return res;
+ }
+ 
++static bool sdl_fido_dialog(freerdp* instance, const char* const* labels, size_t count,
++                            bool pin, std::vector<char>& response, const char* site,
++                            const char* retries)
++{
++	if (!instance || !instance->context || (!pin && (!labels || count < 2 || count > 128)))
++		return false;
++
++	std::shared_ptr<FidoKeyboardGrab> keyboard;
++	try
++	{
++		keyboard = std::make_shared<FidoKeyboardGrab>();
++	}
++	catch (...)
++	{
++		return false;
++	}
++	if (!sdl_fido_release_keyboard(instance->context, keyboard))
++		return false;
++	struct RestoreKeyboard
++	{
++		std::shared_ptr<FidoKeyboardGrab> state;
++		~RestoreKeyboard() { sdl_fido_restore_keyboard(state); }
++	} restore{ keyboard };
++
++	int sockets[2];
++	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0)
++		return FALSE;
++
++	posix_spawn_file_actions_t actions;
++	if (posix_spawn_file_actions_init(&actions) != 0)
++	{
++		close(sockets[0]);
++		close(sockets[1]);
++		return FALSE;
++	}
++	const int actionError = posix_spawn_file_actions_adddup2(&actions, sockets[1], STDIN_FILENO) ||
++	                        posix_spawn_file_actions_adddup2(&actions, sockets[1], STDOUT_FILENO) ||
++	                        posix_spawn_file_actions_addclose(&actions, sockets[0]) ||
++	                        posix_spawn_file_actions_addclose(&actions, sockets[1]);
++	if (actionError)
++	{
++		posix_spawn_file_actions_destroy(&actions);
++		close(sockets[0]);
++		close(sockets[1]);
++		return FALSE;
++	}
++	std::string python = "python3";
++	std::vector<std::string> args = { python, "/app/share/avd-feed-connect/fido-picker.py" };
++	if (pin)
++	{
++		args.emplace_back("--pin");
++		if (sdl_fido_site_valid(site) && (strcmp(site, "-") != 0))
++		{
++			args.emplace_back("--site");
++			args.emplace_back(site);
++		}
++		if (sdl_fido_retries_valid(retries))
++		{
++			args.emplace_back("--retries");
++			args.emplace_back(retries);
++		}
++	}
++	std::vector<char*> argv;
++	for (auto& arg : args)
++		argv.push_back(arg.data());
++	argv.push_back(nullptr);
++	extern char** environ;
++	pid_t child = -1;
++	const int spawned =
++	    posix_spawnp(&child, python.c_str(), &actions, nullptr, argv.data(), environ);
++	posix_spawn_file_actions_destroy(&actions);
++	close(sockets[1]);
++	if (spawned != 0)
++	{
++		close(sockets[0]);
++		return FALSE;
++	}
++
++	auto sendData = [&](const void* data, size_t length) {
++		const auto* bytes = static_cast<const char*>(data);
++		while (length > 0 && !freerdp_shall_disconnect_context(instance->context))
++		{
++			const ssize_t sent = send(sockets[0], bytes, length, MSG_NOSIGNAL | MSG_DONTWAIT);
++			if (sent > 0)
++			{
++				bytes += sent;
++				length -= static_cast<size_t>(sent);
++			}
++			else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
++			{
++				struct pollfd fd = { sockets[0], POLLOUT, 0 };
++				poll(&fd, 1, 100);
++			}
++			else
++				return false;
++		}
++		return length == 0;
++	};
++	uint32_t value = htonl(static_cast<uint32_t>(count));
++	bool ok = pin || sendData(&value, sizeof(value));
++	for (size_t i = 0; ok && i < count; i++)
++	{
++		const char* label = labels[i] ? labels[i] : "";
++		const size_t length = strlen(label);
++		if (length > 520)
++		{
++			ok = false;
++			break;
++		}
++		value = htonl(static_cast<uint32_t>(length));
++		ok = sendData(&value, sizeof(value)) && sendData(label, length);
++	}
++
++	auto receiveData = [&](void* data, size_t length) {
++		auto* bytes = static_cast<char*>(data);
++		while (length > 0 && !freerdp_shall_disconnect_context(instance->context))
++		{
++			struct pollfd fd = { sockets[0], POLLIN, 0 };
++			const int ready = poll(&fd, 1, 100);
++			if (ready < 0 && errno != EINTR)
++				return false;
++			if (ready <= 0)
++				continue;
++			const ssize_t n = recv(sockets[0], bytes, length, 0);
++			if (n <= 0)
++				return false;
++			bytes += n;
++			length -= static_cast<size_t>(n);
++		}
++		return length == 0;
++	};
++	value = 0;
++	ok = ok && receiveData(&value, sizeof(value));
++	const size_t length = ntohl(value);
++	if (length > 256)
++		ok = false;
++	if (ok && length)
++	{
++		try
++		{
++			response.resize(length);
++			ok = receiveData(response.data(), response.size());
++		}
++		catch (...)
++		{
++			ok = false;
++		}
++	}
++	close(sockets[0]);
++	int status = 0;
++	pid_t waited;
++	do
++	{
++		waited = waitpid(child, &status, WNOHANG);
++	} while (waited < 0 && errno == EINTR);
++	if (waited == 0 && !ok)
++		kill(child, SIGTERM);
++	if (waited == 0)
++	{
++		do
++		{
++			waited = waitpid(child, &status, 0);
++		} while (waited < 0 && errno == EINTR);
++	}
++	return ok && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
++}
++
++BOOL sdl_choose_fido_credential(freerdp* instance, const char* const* labels, size_t count,
++                                size_t* choice)
++{
++	if (!choice)
++		return FALSE;
++	std::vector<char> response;
++	if (!sdl_fido_dialog(instance, labels, count, false, response) || response.empty())
++		return FALSE;
++	char text[257] = {};
++	memcpy(text, response.data(), response.size());
++	char* end = nullptr;
++	const long selected = strtol(text, &end, 10);
++	if (end == text || !end || *end != '\0' || selected < 0 ||
++	    static_cast<size_t>(selected) >= count)
++		return FALSE;
++	*choice = static_cast<size_t>(selected);
++	return TRUE;
++}
++
+ SSIZE_T sdl_retry_dialog(freerdp* instance, const char* what, size_t current,
+                          [[maybe_unused]] void* userarg)
+ {
+diff --git i/client/SDL/SDL3/dialogs/sdl_dialogs.hpp w/client/SDL/SDL3/dialogs/sdl_dialogs.hpp
+index 627b369..4a86a13 100644
+--- i/client/SDL/SDL3/dialogs/sdl_dialogs.hpp
++++ w/client/SDL/SDL3/dialogs/sdl_dialogs.hpp
+@@ -30,6 +30,9 @@
+ [[nodiscard]] BOOL sdl_choose_smartcard(freerdp* instance, SmartcardCertInfo** cert_list,
+                                         DWORD count, DWORD* choice, BOOL gateway);
+ 
++[[nodiscard]] BOOL sdl_choose_fido_credential(freerdp* instance, const char* const* labels,
++                                              size_t count, size_t* choice);
++
+ [[nodiscard]] SSIZE_T sdl_retry_dialog(freerdp* instance, const char* what, size_t current,
+                                        void* userarg);
+ 
+diff --git i/client/SDL/SDL3/sdl_channels.cpp w/client/SDL/SDL3/sdl_channels.cpp
+index ac358dd..b622e90 100644
+--- i/client/SDL/SDL3/sdl_channels.cpp
++++ w/client/SDL/SDL3/sdl_channels.cpp
+@@ -17,6 +17,13 @@
+  * limitations under the License.
+  */
+ 
++#include <cinttypes>
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++
+ #include <freerdp/config.h>
+ 
+ #include <winpr/assert.h>
+@@ -123,6 +130,52 @@ void sdl_OnUserNotificationEventHandler(void* context, const UserNotificationEve
+ 	if (strcmp(e->e.Sender, RDPEWA_CHANNEL_NAME) != 0)
+ 		return;
+ 
++	/* rdpewa reports failures as "rdpewa-error:<code>:<site>:<text>" */
++	static const char errorPrefix[] = "rdpewa-error:";
++	bool isError = false;
++	long errorCode = 0;
++	std::string errorSite;
++	const char* errorText = nullptr;
++	if (!e->cancelPreviousNotification && e->message &&
++	    (strncmp(e->message, errorPrefix, sizeof(errorPrefix) - 1) == 0))
++	{
++		const char* cur = e->message + sizeof(errorPrefix) - 1;
++		char* end = nullptr;
++		errno = 0;
++		errorCode = std::strtol(cur, &end, 10);
++		const bool codeValid = (errno == 0) && (end != cur) && (end - cur <= 5) && (*end == ':') &&
++		                       (errorCode > -10000) && (errorCode < 10000);
++		if (codeValid)
++		{
++			const char* site = end + 1;
++			const char* siteEnd = strchr(site, ':');
++			bool siteValid = siteEnd && (siteEnd > site) && (siteEnd - site <= 253);
++			for (const char* c = site; siteValid && c < siteEnd; c++)
++			{
++				siteValid = ((*c >= 'a') && (*c <= 'z')) || ((*c >= 'A') && (*c <= 'Z')) ||
++				            ((*c >= '0') && (*c <= '9')) || (*c == '.') || (*c == '-');
++			}
++			if (siteValid)
++			{
++				isError = true;
++				errorSite.assign(site, siteEnd);
++				errorText = siteEnd + 1;
++			}
++		}
++	}
++
++	if (std::getenv("AVD_WEBAUTHN_NOTIFICATIONS"))
++	{
++		if (isError)
++			std::printf("AVD_FIDO_NOTIFICATION %" PRIu64 " error %ld %s\n", e->messageID,
++			            errorCode, errorSite.c_str());
++		else
++			std::printf("AVD_FIDO_NOTIFICATION %" PRIu64 " %s\n", e->messageID,
++			            e->cancelPreviousNotification ? "clear" : "touch");
++		std::fflush(stdout);
++		return;
++	}
++
+ 	if (e->cancelPreviousNotification)
+ 		return;
+ 
+@@ -131,10 +184,16 @@ void sdl_OnUserNotificationEventHandler(void* context, const UserNotificationEve
+ 		std::string sender;
+ 		std::string message;
+ 		uint32_t timeoutMS = 0;
++		SDL_MessageBoxFlags flags = SDL_MESSAGEBOX_INFORMATION;
+ 	};
+ 
+ 	auto ud = new struct userdata;
+-	if (e->message)
++	if (isError)
++	{
++		ud->message = errorText;
++		ud->flags = SDL_MESSAGEBOX_WARNING;
++	}
++	else if (e->message)
+ 		ud->message = e->message;
+ 	if (e->e.Sender)
+ 		ud->sender = e->e.Sender;
+@@ -148,8 +207,7 @@ void sdl_OnUserNotificationEventHandler(void* context, const UserNotificationEve
+ 		    auto parent = SDL_GetMouseFocus();
+ 		    if (!parent)
+ 			    parent = SDL_GetKeyboardFocus();
+-		    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, ed->sender.c_str(),
+-		                             ed->message.c_str(), parent);
++		    SDL_ShowSimpleMessageBox(ed->flags, ed->sender.c_str(), ed->message.c_str(), parent);
+ 		    delete ed;
+ 	    },
+ 	    ud, false);
+diff --git i/client/SDL/SDL3/sdl_context.cpp w/client/SDL/SDL3/sdl_context.cpp
+index c3fe1fb..632913a 100644
+--- i/client/SDL/SDL3/sdl_context.cpp
++++ w/client/SDL/SDL3/sdl_context.cpp
+@@ -56,6 +56,7 @@ SdlContext::SdlContext(rdpContext* context)
+ 	instance->LogonErrorInfo = sdl_logon_error_info;
+ 	instance->PresentGatewayMessage = sdl_present_gateway_message;
+ 	instance->ChooseSmartcard = sdl_choose_smartcard;
++	instance->ChooseFidoCredential = sdl_choose_fido_credential;
+ 	instance->RetryDialog = sdl_retry_dialog;
+ 	instance->GetAccessToken = client_failsafe_get_access_token;
+ 
+diff --git i/client/common/client.c w/client/common/client.c
+index 5680404..4e476c6 100644
+--- i/client/common/client.c
++++ w/client/common/client.c
+@@ -158,6 +158,17 @@ static void client_cli_user_notification(void* context, const UserNotificationEv
+ 
+ 	if (!e->message || e->message[0] == '\0')
+ 		return;
++
++	static const char errorPrefix[] = "rdpewa-error:";
++	if (strncmp(e->message, errorPrefix, sizeof(errorPrefix) - 1) == 0)
++	{
++		const char* text = strchr(e->message + sizeof(errorPrefix) - 1, ':');
++		text = text ? strchr(text + 1, ':') : NULL;
++		(void)fprintf(stderr, "[%s] %s\n", e->e.Sender,
++		              text ? text + 1 : "The security key request failed.");
++		(void)fflush(stderr);
++		return;
++	}
+ 	(void)fprintf(stderr, "[%s] Touch the security key\n", e->e.Sender);
+ 	(void)fflush(stderr);
+ }
+diff --git i/include/freerdp/freerdp.h w/include/freerdp/freerdp.h
+index 68e392d..7eca050 100644
+--- i/include/freerdp/freerdp.h
++++ w/include/freerdp/freerdp.h
+@@ -158,6 +158,9 @@ extern "C"
+ 	typedef BOOL (*pChooseSmartcard)(freerdp* instance, SmartcardCertInfo** cert_list, DWORD count,
+ 	                                 DWORD* choice, BOOL gateway);
+ 
++	typedef BOOL (*pChooseFidoCredential)(freerdp* instance, const char* const* labels,
++	                                      size_t count, size_t* choice);
++
+ 	typedef enum
+ 	{
+ 		ACCESS_TOKEN_TYPE_AAD, /**!< oauth2 access token for RDS AAD authentication */
+@@ -614,7 +617,8 @@ owned by rdpRdp */
+ 		WINPR_ATTR_NODISCARD ALIGN64 pRetryDialog
+ 		    RetryDialog;                  /* (offset 72) Callback for displaying a dialog in case of
+ 		                something needs a retry */
+-		UINT64 paddingE[80 - 73];         /* 73 */
++		WINPR_ATTR_NODISCARD ALIGN64 pChooseFidoCredential ChooseFidoCredential; /* 73 */
++		UINT64 paddingE[80 - 74];         /* 74 */
+ 	};
+ 
+ 	struct rdp_channel_handles

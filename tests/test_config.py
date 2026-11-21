@@ -134,3 +134,15 @@ def test_broker_redirect_is_registered_scheme_for_client(monkeypatch):
 def test_reset_config_to_commercial(monkeypatch):
     # leave the module back on its default so later tests see commercial
     _config_for(monkeypatch, None)
+
+
+def test_with_login_hint_names_the_signed_in_account_once():
+    base = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=x&scope=a+b"
+    hinted = config.with_login_hint(base, "ana@contoso.com")
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(hinted).query)
+    assert query["login_hint"] == ["ana@contoso.com"]
+    assert query["scope"] == ["a b"] and query["client_id"] == ["x"]
+    assert config.with_login_hint(hinted, "other@contoso.com") == hinted
+    assert config.with_login_hint(base, "") == base
+    evil = "https://evil.example/authorize?client_id=x"
+    assert config.with_login_hint(evil, "ana@contoso.com") == evil

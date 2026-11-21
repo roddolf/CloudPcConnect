@@ -39,6 +39,7 @@ import time
 import urllib.request
 import urllib.parse
 import hashlib
+import hmac
 import base64
 import secrets
 import shutil
@@ -47,6 +48,7 @@ import subprocess
 import shlex
 import pty
 import select
+import termios
 import uuid
 # stdlib HTTP server for the loopback redirect of browser sign-in. Imported by
 # name, NOT as `import http.server`: `http` in this module is our own
@@ -83,13 +85,15 @@ from avd_feed_connect.rdp.security import resolve_security  # noqa: E402
 from avd_feed_connect.rdp.resources import local_resource  # noqa: E402
 from avd_feed_connect.rdp.attempt import ConnectionAttempt  # noqa: E402
 from avd_feed_connect.rdp.launcher import (  # noqa: E402
-    apply_client_hotkeys, build_display_args, session_log_path,
+    apply_client_hotkeys, build_display_args, private_argument_file, session_log_path,
+    webauthn_args,
     HOTKEY_MODIFIER_NAMES, HOTKEY_DEFAULTS, HOTKEY_ACTIONS, HOTKEY_KEYS)
 from avd_feed_connect.rdp.resources import (  # noqa: E402
     rdp_is_remoteapp, set_rdp_desktop_mode)
 from avd_feed_connect.i18n import _ as tr, ngettext, configure, LANGUAGES  # noqa: E402
 from avd_feed_connect.gui.localization import bind, create, strings  # noqa: E402
-from avd_feed_connect.gui.theme import CSS_BASE, PALETTE_DARK, PALETTE_LIGHT  # noqa: E402
+from avd_feed_connect.gui.theme import stylesheet  # noqa: E402
+from avd_feed_connect.gui import omarchy  # noqa: E402
 from avd_feed_connect.gui.demo import demo_resources  # noqa: E402
 from avd_feed_connect.gui import storage, tray_menu, x11focus  # noqa: E402
 from avd_feed_connect.gui.tray import TrayIcon  # noqa: E402
@@ -103,6 +107,66 @@ APP_NAME = "AVD Feed + Connect Linux"
 APP_VERSION = "0.13.0"
 # LOCAL_PROFILE_ID (the synthetic account for user-opened .rdp files, issue #17)
 # is imported from avd_feed_connect.accounts, its single source of truth.
+
+
+def is_broker_redirect(uri):
+    try:
+        parsed = urllib.parse.urlsplit(uri)
+        expected = urllib.parse.urlsplit(config.BROKER_REDIRECT)
+    except ValueError:
+        return False
+    return (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path) == (
+        expected.scheme.lower(), expected.netloc.lower(), expected.path)
+
+
+def fido_error_message(code, site):
+    """Explain a failed in-session security-key request (libfido2 error code)."""
+    site = site if site and site != "-" else None
+    if code == 0x2E:
+        if site:
+            return tr("This security key has no passkey for {site}. Use the key you "
+                      "registered, or sign in another way.").format(site=site)
+        return tr("This security key has no passkey for this sign-in. Use the key you "
+                  "registered, or sign in another way.")
+    if code == 0x31:
+        return tr("Wrong security key PIN.")
+    if code == 0x32:
+        return tr("Your security key PIN is blocked. Reset the key to use it again.")
+    if code == 0x34:
+        return tr("Too many wrong PINs. Remove and reinsert your security key, then try again.")
+    if code in (0x35, 0x36):
+        return tr("Set a PIN on your security key first.")
+    if code in (0x3C, 0x3F):
+        return tr("Your security key could not verify you.")
+    if code in (0x2F, 0x3A):
+        return tr("Your security key was not touched in time.")
+    if code == 0x19:
+        return tr("This security key is already registered.")
+    if code in (0x27, 0x30):
+        return tr("Your security key denied the request.")
+    return tr("The security key request failed.")
+
+
+def sign_in_actions(win, on_cancel, on_in_app=None):
+    """Bottom-right Cancel (plus an optional way back to in-app sign-in) for a
+    header-less sign-in window, which otherwise has no visible close control.
+    Escape cancels too."""
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    row.set_halign(Gtk.Align.END)
+    row.set_margin_top(4)
+    if on_in_app is not None:
+        in_app = create(Gtk.Button, label=tr("Use in-app sign-in"))
+        in_app.add_css_class("flat")
+        in_app.connect("clicked", lambda *_: on_in_app())
+        row.append(in_app)
+    cancel = create(Gtk.Button, label=tr("Cancel"))
+    cancel.connect("clicked", lambda *_: on_cancel())
+    row.append(cancel)
+    keys = Gtk.ShortcutController()
+    keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("Escape"),
+                                       Gtk.CallbackAction.new(lambda *_: (on_cancel(), True)[1])))
+    win.add_controller(keys)
+    return row
 
 
 class _LoopbackHandler(BaseHTTPRequestHandler):
@@ -210,7 +274,7 @@ class AvdApp(Gtk.Application):
                 uri = f.get_uri()
             except Exception:
                 uri = None
-            if uri and uri.split(":", 1)[0].lower() == "ms-appx-web":
+            if uri and is_broker_redirect(uri):
                 delivered = (self._deliver_scheme_code(uri)
                              or self._deliver_scheme_conn(uri) or delivered)
         if not delivered:
@@ -221,31 +285,45 @@ class AvdApp(Gtk.Application):
         ms-appx-web scheme handler (no paste) instead of the native-client paste.
         Default on for the sovereign clouds, where the broker redirect is the one
         registered redirect (loopback/nativeclient are not) and a Gov tester has
-        confirmed the full no-paste connect. Commercial keeps the native-client
-        paste unless AVD_SCHEME_SIGNIN forces it (for testing the chain there). A
+        confirmed the full no-paste connect. Commercial signs in inside the app
+        (native-client redirect, captured by the embedded WebView) unless the
+        system-browser preference or AVD_SCHEME_SIGNIN selects the browser. A
         local .rdp keeps its own flow (it may carry a baked-in gateway token and
         has no feed token to inject)."""
         if session.local:
             return False
         force = os.environ.get("AVD_SCHEME_SIGNIN", "").strip().lower() \
             in ("1", "true", "yes", "on")
-        return force or config.CLOUD != "commercial"
+        return force or config.CLOUD != "commercial" or self._use_browser_signin()
+
+    @staticmethod
+    def _inject_bearer(session):
+        """Whether the gateway bearer token we already hold is handed to FreeRDP,
+        which skips its own gateway 'Browse to:' prompt. Any feed account has
+        one; a local .rdp keeps its own (possibly baked-in) gateway token."""
+        return bool(session.token) and not session.local
 
     def _deliver_scheme_conn(self, uri):
         """Route a caught ms-appx-web connection redirect to the most recent live
         connection-time AAD prompt. Its ``finish`` writes the URL to FreeRDP's
         pty, exactly as a manual paste would, so no code races FreeRDP's reader."""
+        if not is_broker_redirect(uri):
+            return False
         try:
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(uri).query)
         except Exception:
             return False
-        if "code" not in qs and "error" not in qs:
+        states = qs.get("state", [])
+        if len(states) != 1 or ("code" not in qs and "error" not in qs):
             return False
-        while self._conn_scheme_waiters:
-            waiter = self._conn_scheme_waiters.pop()
+        for waiter in reversed(self._conn_scheme_waiters[:]):
             attempt = waiter.get("attempt")
             if attempt is not None and not attempt.active():
-                continue   # a cancelled/finished connection — skip to an older one
+                self._conn_scheme_waiters.remove(waiter)
+                continue
+            if not hmac.compare_digest(states[0].encode(), waiter["state"].encode()):
+                continue
+            self._conn_scheme_waiters.remove(waiter)
             if self.win:
                 self.win.present()
             self._toast(tr("Signed in. You can close the browser tab that's "
@@ -259,7 +337,7 @@ class AvdApp(Gtk.Application):
         sign-in. Returns True if a waiting sign-in accepted it. The state must
         match the one we sent, so a stray or foreign redirect is ignored."""
         pending = self._pending_scheme
-        if not pending:
+        if not pending or not is_broker_redirect(uri):
             return False
         want_state, cb = pending
         try:
@@ -379,6 +457,8 @@ class AvdApp(Gtk.Application):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             button = create(Gtk.Button, )
             button.add_css_class("flat")
+            if session.id == self.selected_id:
+                button.add_css_class("current-account")
             button.set_hexpand(True)
             text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             name = session.display_name
@@ -396,7 +476,7 @@ class AvdApp(Gtk.Application):
             button.connect("clicked", lambda _, sid=session.id: (
                 self._account_pop.popdown(), self._select_account(sid)))
             edit = Gtk.Button.new_from_icon_name("document-edit-symbolic")
-            edit.add_css_class("flat")
+            edit.add_css_class("flat"); edit.add_css_class("row-edit")
             bind(edit, 'tooltip_text', tr("Edit account name"))
             edit.connect("clicked", lambda _, owner=session: (
                 self._account_pop.popdown(), self._edit_account_name(owner)))
@@ -452,7 +532,7 @@ class AvdApp(Gtk.Application):
         dialog.set_child(box)
         dialog.present()
 
-    def _add_account(self):
+    def _add_account(self, browser=None, remember=False):
         if self._adding:
             return
         profile = {'id': uuid.uuid4().hex, 'tid': '', 'oid': '', 'upn': ''}
@@ -460,7 +540,7 @@ class AvdApp(Gtk.Application):
                                  profile_dir(self.registry.root, profile['id']))
         session.client.upn = ""
         self._adding = session
-        self._interactive_signin(session)
+        self._interactive_signin(session, browser=browser, remember=remember)
 
     def _discard_add(self, session):
         if session is self._adding:
@@ -506,6 +586,9 @@ class AvdApp(Gtk.Application):
             return False
         if pref == "dark":
             return True
+        tokens = getattr(self, "_omarchy", None)
+        if tokens:
+            return tokens["dark"]
         s = Gtk.Settings.get_default()
         try:
             if s.get_property("gtk-application-prefer-dark-theme"):
@@ -518,8 +601,15 @@ class AvdApp(Gtk.Application):
             return False
 
     def _apply_theme(self, *_):
-        css = (PALETTE_DARK if self._is_dark() else PALETTE_LIGHT) + CSS_BASE
-        self._css_provider.load_from_string(css)
+        tokens = getattr(self, "_omarchy", None)
+        self._css_provider.load_from_string(stylesheet(self._is_dark(), tokens))
+
+    def _on_omarchy_changed(self):
+        """Live Omarchy theme/font switch: re-read the tokens, restyle in place."""
+        tokens = omarchy.load()
+        if tokens != self._omarchy:
+            self._omarchy = tokens
+            self._apply_theme()
 
     def _set_theme(self, key):
         """Persist the appearance choice (system/light/dark) and apply it live."""
@@ -532,6 +622,9 @@ class AvdApp(Gtk.Application):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), self._css_provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self._omarchy = omarchy.load()
+        self._theme_watch = (omarchy.ThemeWatcher(self._on_omarchy_changed).start()
+                             if self._omarchy else None)
         self._apply_theme()
         st = Gtk.Settings.get_default()
         for prop in ("notify::gtk-application-prefer-dark-theme", "notify::gtk-theme-name"):
@@ -546,6 +639,13 @@ class AvdApp(Gtk.Application):
         outside.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         outside.connect("pressed", self._on_menu_outside_pressed)
         self.win.add_controller(outside)
+        keys = Gtk.ShortcutController()
+        for trigger, handler in (("<Control>r", self._on_refresh_shortcut),
+                                 ("F5", self._on_refresh_shortcut),
+                                 ("slash", self._on_filter_shortcut)):
+            keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string(trigger),
+                                               Gtk.CallbackAction.new(handler)))
+        self.win.add_controller(keys)
 
         # ---- header bar: brand (left) · refresh + account (right) -----------
         hb = Gtk.HeaderBar()
@@ -553,12 +653,12 @@ class AvdApp(Gtk.Application):
         hb.set_title_widget(create(Gtk.Label, ))     # blank the centered window title
         self.win.set_titlebar(hb)
 
-        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=11)
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         # The mark IS the image (a Gtk.Image always draws its icon centered in
         # its allocation), sized/tinted by the .mark CSS — no box wrapper to
         # mis-align or expand.
         mark = Gtk.Image.new_from_icon_name("computer-symbolic")
-        mark.set_pixel_size(18); mark.add_css_class("mark"); mark.set_valign(Gtk.Align.CENTER)
+        mark.set_pixel_size(14); mark.add_css_class("mark"); mark.set_valign(Gtk.Align.CENTER)
         tbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         tbox.set_valign(Gtk.Align.CENTER)      # center the title block next to the logo
         t1 = create(Gtk.Label, label="AVD Feed + Connect", xalign=0); t1.add_css_class("brand-title")
@@ -685,6 +785,9 @@ class AvdApp(Gtk.Application):
         bind(settings_btn, 'tooltip_text', tr("Settings"))
         settings_pop.set_child(pbox)
         settings_btn.set_popover(settings_pop)
+        settings_pop.set_has_arrow(False)
+        for item in (language_btn, setbtn):
+            item.get_child().set_xalign(0)
         # Avoid an input grab that can deactivate the parent on touch input.
         # Outside presses and parent deactivation dismiss these menus explicitly.
         pop = Gtk.Popover(autohide=False)
@@ -727,6 +830,9 @@ class AvdApp(Gtk.Application):
         self._signout_item = signout
         pbox.append(signout)
         pop.set_child(pbox)
+        pop.set_has_arrow(False)
+        for item in (add, openrdp, signout):
+            item.get_child().set_xalign(0)
         menu_btn.set_popover(pop)
 
         self.refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
@@ -747,8 +853,8 @@ class AvdApp(Gtk.Application):
         signin = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         signin.add_css_class("avd-page")
         signin.set_valign(Gtk.Align.CENTER); signin.set_halign(Gtk.Align.CENTER)
-        bm = Gtk.Image.new_from_icon_name("computer-symbolic"); bm.set_pixel_size(32)
-        bm.add_css_class("bigmark"); bm.set_margin_bottom(14); bm.set_halign(Gtk.Align.CENTER)
+        bm = Gtk.Image.new_from_icon_name("computer-symbolic"); bm.set_pixel_size(26)
+        bm.add_css_class("bigmark"); bm.set_margin_bottom(18); bm.set_halign(Gtk.Align.CENTER)
         h1 = create(Gtk.Label, label=tr("Sign in to your workspaces")); h1.add_css_class("hero-title")
         h2 = create(Gtk.Label, label=tr("Connect your Microsoft work account to see the desktops "
                              "and apps you're entitled to."))
@@ -781,12 +887,21 @@ class AvdApp(Gtk.Application):
         wp.add_css_class("avd-page")
 
         head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        for m, v in (("top", 18), ("start", 22), ("end", 22), ("bottom", 4)):
+        for m, v in (("top", 14), ("start", 22), ("end", 22), ("bottom", 2)):
             getattr(head, f"set_margin_{m}")(v)
+        head.set_size_request(-1, 28)  # room for the filter entry without a layout jump
         sh = create(Gtk.Label, label=tr("YOUR WORKSPACES"), xalign=0); sh.add_css_class("section-h")
         sh.set_hexpand(True)
         self._count_lbl = create(Gtk.Label, label="", xalign=1); self._count_lbl.add_css_class("count")
-        head.append(sh); head.append(self._count_lbl)
+        # Hidden until "/" — narrows the tiles by title, Esc clears it.
+        self._filter = create(Gtk.SearchEntry, placeholder_text=tr("Filter workspaces…"))
+        self._filter.add_css_class("filter")
+        self._filter.set_valign(Gtk.Align.CENTER); self._filter.set_margin_end(10)
+        self._filter.set_visible(False)
+        self._filter.connect("search-changed", lambda *_: self._apply_filter())
+        self._filter.connect("stop-search", lambda *_: self._close_filter())
+        self._filter.connect("activate", lambda *_: self._focus_first_tile())
+        head.append(sh); head.append(self._filter); head.append(self._count_lbl)
         wp.append(head)
 
         sw = Gtk.ScrolledWindow()
@@ -799,6 +914,7 @@ class AvdApp(Gtk.Application):
         self.grid.set_margin_top(8); self.grid.set_margin_bottom(18)
         self.grid.set_margin_start(22); self.grid.set_margin_end(22)
         self.grid.connect("child-activated", self._on_tile_activated)
+        self.grid.set_filter_func(self._filter_tile)
         self._resource_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.START)
         self._resource_box.append(self.grid)
         sw.set_child(self._resource_box)
@@ -837,6 +953,9 @@ class AvdApp(Gtk.Application):
         toast.set_margin_bottom(18)
         self._toast_label = create(Gtk.Label, label="", xalign=0, wrap=True)
         self._toast_label.add_css_class("toast-label")
+        # Wrapped labels in a horizontal box shrink to their narrowest fit;
+        # expanding keeps short notices on one line.
+        self._toast_label.set_max_width_chars(60); self._toast_label.set_hexpand(True)
         toast_close = Gtk.Button.new_from_icon_name("window-close-symbolic")
         toast_close.add_css_class("flat")
         toast_close.connect("clicked", lambda *_: self._hide_toast())
@@ -874,6 +993,52 @@ class AvdApp(Gtk.Application):
             popover = getattr(self, name, None)
             if popover is not None:
                 popover.popdown()
+
+    def _on_refresh_shortcut(self, *_):
+        if self.stack.get_visible_child_name() != "workspaces":
+            return False
+        self._reload_feed()
+        return True
+
+    def _on_filter_shortcut(self, *_):
+        if self.stack.get_visible_child_name() != "workspaces" or not self._tiles:
+            return False
+        self._filter.set_visible(True)
+        self._filter.grab_focus()
+        return True
+
+    def _filter_tile(self, child):
+        entry = getattr(self, "_filter", None)
+        query = entry.get_text().strip().casefold() if entry else ""
+        return not query or query in child._res.get("title", "").casefold()
+
+    def _apply_filter(self):
+        for grid in {t.get_parent() for t in self._tiles if t.get_parent() is not None}:
+            grid.invalidate_filter()
+
+    def _close_filter(self):
+        self._filter.set_text("")
+        self._filter.set_visible(False)
+        self._apply_filter()
+        self._focus_first_tile()
+
+    def _focus_first_tile(self):
+        for child in self._tiles:
+            if child.get_child_visible() and child.get_mapped():
+                child.grab_focus()
+                return
+
+    def _empty_state(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
+                      halign=Gtk.Align.CENTER, margin_top=56)
+        box.add_css_class("empty")
+        glyph = Gtk.Image.new_from_icon_name("computer-symbolic")
+        glyph.set_pixel_size(28); glyph.add_css_class("empty-glyph"); glyph.set_margin_bottom(6)
+        title = create(Gtk.Label, label=tr("No workspaces yet")); title.add_css_class("empty-title")
+        hint = create(Gtk.Label, label=tr("Press Ctrl+R to refresh")); hint.add_css_class("hero-note")
+        for widget in (glyph, title, hint):
+            box.append(widget)
+        return box
 
     def _on_menu_outside_pressed(self, _gesture, _count, x, y):
         target = self.win.pick(x, y, Gtk.PickFlags.DEFAULT)
@@ -1059,14 +1224,34 @@ class AvdApp(Gtk.Application):
                 pass
         return session.web_session
 
+    def _signin_surface(self, wv, window, on_request=None):
+        """Let a sign-in WebView use a FIDO2 security key (WebKitGTK has no
+        WebAuthn): inject the shim, answer it from the key, and show the
+        insert/touch/PIN/account prompt over the page. ``on_request`` runs when
+        the page asks for the key (to reveal a window that was waiting for
+        silent SSO). Returns the widget to put in the window."""
+        from avd_feed_connect.gui.signin_panel import SignInPanel
+        from avd_feed_connect.gui.webauthn import WebAuthnBridge
+        panel = SignInPanel()
+        bridge = WebAuthnBridge(wv, panel, on_request=on_request).attach()
+        # GTK 4 does not emit "destroy" from gtk_window_destroy() while Python
+        # still references the window; "unrealize" does fire there, so a closed
+        # (or handed-off) sign-in never keeps the security key busy.
+        window.connect("unrealize", lambda *_: bridge.cancel())
+        overlay = Gtk.Overlay()
+        overlay.set_child(wv)
+        overlay.add_overlay(panel)
+        return overlay
+
     def _use_browser_signin(self):
         """True when sign-in should go through the system browser (auth-code +
         PKCE) instead of the embedded WebView. Needed for tenants that enforce
         certificate-based auth (smart card / CAC / PIV): WebKitGTK has no PKCS#11
         bridge, so it can't present a client certificate and sign-in fails before
-        the card is ever read (issue #17) — the real browser can. The browser
-        also gives passkeys/FIDO and existing SSO. AVD_BROWSER_SIGNIN forces it
-        on/off; otherwise it's the saved toggle."""
+        the card is ever read (issue #17) — the real browser can. FIDO2 security
+        keys work in the embedded WebView through the WebAuthn bridge, so this is
+        off unless the user opts in. AVD_BROWSER_SIGNIN forces it on/off;
+        otherwise it's the saved toggle."""
         env = os.environ.get("AVD_BROWSER_SIGNIN", "").strip().lower()
         if env in ("1", "true", "yes", "on"):
             return True
@@ -1074,19 +1259,22 @@ class AvdApp(Gtk.Application):
             return False
         return bool(self._settings.get("_browser_signin", False))
 
-    def _interactive_signin(self, session=None):
+    def _interactive_signin(self, session=None, browser=None, remember=False):
+        """``browser`` None follows the sign-in preference; True/False picks the
+        system browser / in-app sign-in for this one sign-in. ``remember`` saves
+        the browser preference once that browser sign-in succeeds."""
         # Device-code is kept as a hidden fallback (AVD_DEVICE_CODE=1) for the
         # rare tenant that allows it; many block it via Conditional Access, so
         # the browser auth-code flow is the default "sign in with a browser".
         if os.environ.get("AVD_DEVICE_CODE", "").strip().lower() in ("1", "true", "yes", "on"):
             self._devicecode_signin(session)
             return
-        if self._use_browser_signin():
-            self._browser_signin(session)
+        if browser or (browser is None and self._use_browser_signin()):
+            self._browser_signin(session, offer_in_app=browser is True, remember=remember)
             return
         session = session or self.current
         if session is None:
-            self._add_account()
+            self._add_account(browser=browser)
             return
         if session.removed:
             return
@@ -1122,7 +1310,7 @@ class AvdApp(Gtk.Application):
         # a standalone top-level, since a modal dialog needs a visible parent.
         parent = self.win if self.win and self.win.get_visible() else None
         dlg = create(Gtk.Window, title=tr("Sign in"), transient_for=parent, modal=parent is not None)
-        dlg.set_default_size(520, 640)
+        dlg.set_default_size(760, 680)
         # Shared PERSISTENT session (SSO cookies kept on disk) so a re-auth is a
         # click-through and the connection-time token can be fetched silently.
         # The half-finished-flow / ghost-window problems that made us try an
@@ -1131,9 +1319,24 @@ class AvdApp(Gtk.Application):
         # so persistence is safe and is what actually reduces sign-in prompts.
         wv = WebKit.WebView(network_session=self._web_session(session))
         self._apply_ua(wv)   # account sign-in → Default UA (issue #28)
-        dlg.set_child(wv)
+        dlg.set_child(self._signin_surface(wv, dlg))
         self._signin_dlg = dlg
         got_code = [False]
+        handoff = [False]
+
+        header = Gtk.HeaderBar()
+        browser_btn = create(Gtk.Button, label=tr("Use system browser"))
+        browser_btn.add_css_class("flat")
+        header.pack_end(browser_btn)
+        dlg.set_titlebar(header)
+
+        def use_browser(*_):
+            # Hand this same account over to the browser flow; it must not be
+            # discarded the way a closed sign-in is.
+            handoff[0] = True
+            close()
+            self._browser_signin(session, offer_in_app=True)
+        browser_btn.connect("clicked", use_browser)
 
         # Block popups. A page (e.g. the personal-account "approve on your phone"
         # step) can call window.open(); WebKit would spawn a separate, orphan
@@ -1141,18 +1344,30 @@ class AvdApp(Gtk.Application):
         # closed. Returning None here declines the popup instead.
         wv.connect("create", lambda *_a: None)
 
+        closed = [False]
+
         def on_closed(*_):
             # Clicking the window's × always closes it and fully resets state,
             # so the next sign-in is a clean start (no resumed half-finished flow).
+            if closed[0]:
+                return
+            closed[0] = True
             if self._signin_dlg is dlg:
                 self._signin_dlg = None
-            if not got_code[0]:
+            if not got_code[0] and not handoff[0]:
                 session.pending_launch = None
                 self._discard_add(session)
+
+        def close(*_):
+            # Reset explicitly: GTK 4 does not emit "destroy" when the window is
+            # destroyed while Python still holds it.
+            on_closed()
+            dlg.destroy()
+            return True
         dlg.connect("destroy", on_closed)
         # Default close-request already destroys the window; make it explicit and
         # unconditional so nothing can swallow the close.
-        dlg.connect("close-request", lambda w: (w.destroy(), True)[1])
+        dlg.connect("close-request", close)
 
         def on_decide(view, decision, dtype):
             if dtype != WebKit.PolicyDecisionType.NAVIGATION_ACTION:
@@ -1231,22 +1446,23 @@ class AvdApp(Gtk.Application):
         return False
 
     def _start_browser_signin(self):
-        """Hero shortcut: switch to system-browser sign-in and start it. Sticky,
-        because a tenant that needs it (certificate-based auth) needs it for
-        every re-auth, and the toggle is reversible in Default settings."""
-        self._settings["_browser_signin"] = True
-        storage.save_settings(self._settings)
-        self._interactive_signin()
+        """Hero shortcut: sign in through the system browser. The preference
+        becomes sticky only once that sign-in succeeds — a tenant that needs it
+        (certificate-based auth) needs it for every re-auth, and the toggle is
+        reversible in Default settings — so a cancelled mis-click changes nothing."""
+        self._interactive_signin(browser=True, remember=True)
 
-    def _browser_signin(self, session=None):
+    def _browser_signin(self, session=None, offer_in_app=False, remember=False):
         """System-browser auth-code + PKCE sign-in (issue #17). Opens the real
         browser so a smart card / certificate can be used, and captures the code
         on a loopback redirect. If the loopback can't bind or isn't a registered
         redirect for the client, the user falls back to pasting the final URL —
-        the OOB nativeclient flow, exactly like FreeRDP's 'Browse to:'."""
+        the OOB nativeclient flow, exactly like FreeRDP's 'Browse to:'.
+        ``offer_in_app`` adds a way back to in-app sign-in; ``remember`` saves
+        the browser preference once a sign-in code arrives."""
         session = session or self.current
         if session is None:
-            self._add_account()
+            self._add_account(browser=True if offer_in_app else None, remember=remember)
             return
         if session.removed:
             return
@@ -1275,6 +1491,7 @@ class AvdApp(Gtk.Application):
         dlg.set_default_size(480, -1)
         self._signin_dlg = dlg
         done = [False]
+        handoff = [False]
         server_ref = [None]
         redirect_used = [None]   # which redirect_uri the current authorize used
 
@@ -1321,7 +1538,15 @@ class AvdApp(Gtk.Application):
         paste_box.append(paste_note); paste_box.append(paste_entry); paste_box.append(paste_go)
         paste_box.set_visible(False)
 
-        for w in (heading, intro, btnrow, copy_note, statusrow, paste_link, paste_box):
+        def use_in_app():
+            # Same account, in-app sign-in; it must not be discarded the way a
+            # cancelled sign-in is.
+            handoff[0] = True
+            close()
+            self._interactive_signin(session, browser=False)
+
+        actions = sign_in_actions(dlg, lambda: close(), use_in_app if offer_in_app else None)
+        for w in (heading, intro, btnrow, copy_note, statusrow, paste_link, paste_box, actions):
             box.append(w)
         dlg.set_child(box)
 
@@ -1340,10 +1565,16 @@ class AvdApp(Gtk.Application):
                 threading.Thread(target=lambda: (srv.shutdown(), srv.server_close()),
                                  daemon=True).start()
 
+        def complete(redirect_uri, qs):
+            if (self._browser_complete(session, dlg, verifier, redirect_uri,
+                                       qs, state, done, shutdown_server)
+                    and remember):
+                self._settings["_browser_signin"] = True
+                storage.save_settings(self._settings)
+
         def on_code_main(qs):
             if not done[0] and self._signin_dlg is dlg:
-                self._browser_complete(session, dlg, verifier, redirect_used[0],
-                                       qs, state, done, shutdown_server)
+                complete(redirect_used[0], qs)
             return False
 
         def start_loopback():
@@ -1422,22 +1653,33 @@ class AvdApp(Gtk.Application):
             qs = urllib.parse.parse_qs(frag)
             if "code" not in qs and "error" not in qs and frag:
                 qs = {"code": [frag.split("&", 1)[0]], "state": [state]}
-            self._browser_complete(session, dlg, verifier, config.REDIRECT,
-                                   qs, state, done, shutdown_server)
+            complete(config.REDIRECT, qs)
         paste_go.connect("clicked", do_paste)
         paste_entry.connect("activate", do_paste)
 
+        closed = [False]
+
         def on_closed(*_):
+            if closed[0]:
+                return
+            closed[0] = True
             if self._signin_dlg is dlg:
                 self._signin_dlg = None
             if self._pending_scheme and self._pending_scheme[0] == state:
                 self._pending_scheme = None
             shutdown_server()
-            if not done[0]:
+            if not done[0] and not handoff[0]:
                 session.pending_launch = None
                 self._discard_add(session)
+
+        def close(*_):
+            # Reset explicitly: GTK 4 does not emit "destroy" when the window is
+            # destroyed while Python still holds it.
+            on_closed()
+            dlg.destroy()
+            return True
         dlg.connect("destroy", on_closed)
-        dlg.connect("close-request", lambda w: (w.destroy(), True)[1])
+        dlg.connect("close-request", close)
 
         # Loopback auto-capture (http://localhost:<port>) only works where that
         # redirect is registered for the public MS Remote Desktop client. On
@@ -1457,14 +1699,15 @@ class AvdApp(Gtk.Application):
 
     def _browser_complete(self, session, dlg, verifier, redirect_uri, qs,
                            state, done, shutdown_server):
+        """Finish a browser sign-in; True once a code is being exchanged."""
         if done[0]:
-            return
+            return False
         if qs.get("error"):
             message = (qs.get("error_description") or qs.get("error"))[0]
         elif qs.get("state", [state])[0] != state:
             message = tr("Sign-in state mismatch, please retry.")
         elif not qs.get("code", [""])[0]:
-            return      # nothing usable yet (e.g. a stray probe) — keep waiting
+            return False    # nothing usable yet (e.g. a stray probe) — keep waiting
         else:
             message = None
         done[0] = True
@@ -1475,11 +1718,12 @@ class AvdApp(Gtk.Application):
         dlg.destroy()
         if message is not None:
             self._signin_failed(session, message)
-            return
+            return False
         self._show("busy", session)
         threading.Thread(target=self._browser_exchange,
                          args=(qs["code"][0], verifier, redirect_uri, session),
                          daemon=True).start()
+        return True
 
     def _browser_exchange(self, code, verifier, redirect_uri, session):
         try:
@@ -1811,6 +2055,7 @@ class AvdApp(Gtk.Application):
                                    homogeneous=True, selection_mode=Gtk.SelectionMode.NONE,
                                    margin_top=8, margin_bottom=18, margin_start=22, margin_end=22)
                 grid.connect("child-activated", self._on_tile_activated)
+                grid.set_filter_func(self._filter_tile)
                 section.append(grid)
                 self.grid = grid
                 for res in resources:
@@ -1821,6 +2066,8 @@ class AvdApp(Gtk.Application):
                     child._res = res
                     grid.append(child)
                     self._tiles.append(child)
+            if self.view_mode != "all" and not owner.resources:
+                section.append(self._empty_state())
         count = len(self._tiles)
         bind(self._count_lbl, 'text',
              ngettext("{count} resource", "{count} resources", count).format(count=count))
@@ -1885,10 +2132,10 @@ class AvdApp(Gtk.Application):
         ic = Gtk.Box(); ic.add_css_class("ic")
         ic.add_css_class("desktop" if is_desktop else "app")
         ic.set_halign(Gtk.Align.START); ic.set_valign(Gtk.Align.CENTER)
-        ic.set_size_request(52, 52)          # fixed square, so the glyph centers
+        ic.set_size_request(40, 40)          # fixed square, so the glyph centers
         img = Gtk.Image.new_from_icon_name(
             "computer-symbolic" if is_desktop else "view-grid-symbolic")
-        img.set_pixel_size(26)
+        img.set_pixel_size(22)
         img.set_hexpand(True); img.set_vexpand(True)
         img.set_halign(Gtk.Align.CENTER); img.set_valign(Gtk.Align.CENTER)
         ic.append(img)
@@ -1948,7 +2195,8 @@ class AvdApp(Gtk.Application):
             return
         key = (session.id, res_id)
         # Render session state as a corner pill: amber "Connecting", green
-        # "Connected", hidden when idle. (css: state-connecting/connected/ended)
+        # "Connected", red "Failed", hidden when idle.
+        # (css: state-connecting/connected/error/ended)
         def apply():
             if attempt is not None and (not attempt.is_current()
                     or (attempt.cancelled.is_set() and not allow_cancelled)):
@@ -1962,9 +2210,16 @@ class AvdApp(Gtk.Application):
             if not ch:
                 return
             pill, tile = ch._pill, ch._tile
-            pill.remove_css_class("pill-connecting")
-            tile.remove_css_class("tile-connected")
-            if css == "state-connected":
+            for name in ("pill-connecting", "pill-error"):
+                pill.remove_css_class(name)
+            for name in ("tile-connected", "tile-error"):
+                tile.remove_css_class(name)
+            if css == "state-error":
+                bind(pill, 'text', tr("FAILED"))
+                pill.add_css_class("pill-error")
+                pill.set_visible(True)
+                tile.add_css_class("tile-error")
+            elif css == "state-connected":
                 bind(pill, 'text', tr("CONNECTED"))
                 pill.set_visible(True)
                 tile.add_css_class("tile-connected")
@@ -2070,7 +2325,7 @@ class AvdApp(Gtk.Application):
             return GLib.SOURCE_REMOVE
         clear()
 
-    def _launch(self, child, res, windowed, session, attempt=None):
+    def _launch(self, child, res, windowed, session, attempt=None, monitor_retries=0):
         if attempt is None:
             attempt = ConnectionAttempt()
             child._attempt = attempt
@@ -2130,7 +2385,9 @@ class AvdApp(Gtk.Application):
         # nothing in the subprocess re-selects Wayland.
         env["GDK_BACKEND"] = "x11"
         env["SDL_VIDEODRIVER"] = "x11"
-        env.pop("WAYLAND_DISPLAY", None)
+        wayland_display = env.pop("WAYLAND_DISPLAY", None)
+        if wayland_display:
+            env["AVD_PICKER_WAYLAND_DISPLAY"] = wayland_display
         # FreeRDP no longer has its own webview (we resolve AAD in-process), but
         # keep this set for the child in case any bundled component initializes
         # WebKitGTK — the DMABUF/GBM path blanks on some GPUs. Harmless otherwise.
@@ -2167,13 +2424,12 @@ class AvdApp(Gtk.Application):
             f"session_{safe}_{hashlib.sha256(res['id'].encode()).hexdigest()[:16]}")
         scheme_conn = self._scheme_connect(session)
         gw = config.gateway_arg()
-        if scheme_conn and session.token:
+        inject_bearer = self._inject_bearer(session)
+        if inject_bearer:
             # Hand FreeRDP the AVD access token we already hold (same audience as
             # the feed scope) so it skips the ARM gateway's own "Browse to:"
             # prompt — arm.c only prompts when GatewayHttpExtAuthBearer is unset.
-            # NOTE: this puts the token on the child's argv, so it is visible to
-            # `ps` for this user; it is the user's own short-lived token on their
-            # own machine, and never printed to our logs.
+            # The complete argument list is passed through a private descriptor.
             gw = gw + ",bearer:" + session.token
         argv = [config.SDL, path, f"/gateway:{gw}",
                 "/sec:nla" if nla else "/sec:aad"]
@@ -2230,6 +2486,7 @@ class AvdApp(Gtk.Application):
                  "/prevent-session-lock:120"]
         if teams_redir:
             argv.append("/dvc:teams-redir")
+        argv += webauthn_args(path, security.options)
         mm = os.environ.get("AVD_MULTIMON", "").strip().lower()
         forced_multimon = mm in ("1", "on", "true", "yes")
         # Read the live display layout now, at connect time — not the monitor count
@@ -2292,10 +2549,19 @@ class AvdApp(Gtk.Application):
                 self._set_connecting(res["id"], res["title"], False, session, attempt=attempt)
                 return
             master, slave = pty.openpty()
+            args_fd = None
             try:
-                proc = subprocess.Popen(argv, env=env, stdin=slave, stdout=slave,
+                attributes = termios.tcgetattr(slave)
+                attributes[3] &= ~termios.ECHO
+                termios.tcsetattr(slave, termios.TCSANOW, attributes)
+                command = argv
+                extra_fds = ()
+                if inject_bearer:
+                    command, args_fd = private_argument_file(argv)
+                    extra_fds = (args_fd,)
+                proc = subprocess.Popen(command, env=env, stdin=slave, stdout=slave,
                                         stderr=slave, start_new_session=True,
-                                        close_fds=True)
+                                        close_fds=True, pass_fds=extra_fds)
                 attempt.attach(proc)
             except Exception as error:
                 os.close(master)
@@ -2309,6 +2575,8 @@ class AvdApp(Gtk.Application):
                 return
             finally:
                 os.close(slave)
+                if args_fd is not None:
+                    os.close(args_fd)
         def publish():
             child._workspace_placement = backend.create_placement(proc, workspace_title) if workspace_title else None
             child._proc = proc
@@ -2319,11 +2587,19 @@ class AvdApp(Gtk.Application):
             return
         GLib.idle_add(self._tray_refresh)    # Focus/Disconnect now apply
         self._set_status(tr("Launched {resource}").format(resource=res['title']), session, attempt=attempt)
-        self._watch_session(child, res, proc, master, logpath, session, attempt)
+        retry = self._watch_session(
+            child, res, proc, master, logpath, session, attempt,
+            retry_monitor=monitor_retries < 2)
+        if retry:
+            self._set_status(tr("Display not ready; retrying {resource}…").format(
+                resource=res['title']), session, attempt=attempt)
+            if not attempt.cancelled.wait(1) and attempt.active() and not session.removed:
+                self._launch(child, res, windowed, session, attempt, monitor_retries + 1)
 
     _ANSI = _re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
 
-    def _watch_session(self, child, res, proc, master, logpath, session, attempt=None):
+    def _watch_session(self, child, res, proc, master, logpath, session, attempt=None,
+                       retry_monitor=False):
         """Read sdl-freerdp's PTY output: flip the tile to 'Connected' on logon,
         service each 'Browse to:' AAD prompt silently, and tidy up on exit."""
         attempt = attempt or getattr(child, "_attempt", None)
@@ -2373,6 +2649,8 @@ class AvdApp(Gtk.Application):
                 os.close(master)
             except OSError:
                 pass
+        for notification_id in state.get("fido_notifications", set()):
+            GLib.idle_add(self.withdraw_notification, notification_id)
         if attempt is not None and attempt.close_auth:
             def close_pending_auth():
                 if attempt.close_auth:
@@ -2381,6 +2659,21 @@ class AvdApp(Gtk.Application):
             GLib.idle_add(close_pending_auth)
         if attempt is not None and not attempt.active():
             return
+        monitor_failure = (state.get("monitor_zero") and state.get("preconnect_failed")
+                           and not state["connected"] and not state.get("auth_prompt"))
+        if monitor_failure:
+            if retry_monitor and attempt is not None:
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    if attempt.active() and not session.removed:
+                        return True
+            if attempt is not None and (not attempt.active() or session.removed):
+                return
+            self._error(tr("Could not detect a usable display for {resource}. "
+                           "Check your display and try again.").format(resource=res['title']))
         child._launching = False
         self._set_connecting(res["id"], res["title"], False, session, attempt=attempt)  # ensure overlay clears
         self._set_tile_state(res["id"], "state-ended", session, attempt=attempt)
@@ -2393,6 +2686,42 @@ class AvdApp(Gtk.Application):
         attempt = state.get("attempt", getattr(child, "_attempt", None))
         if attempt is not None and not attempt.active():
             return
+        notification = _re.fullmatch(
+            r"AVD_FIDO_NOTIFICATION ([0-9]{1,20}) "
+            r"(touch|clear|error (-?[0-9]{1,4}) ([A-Za-z0-9.-]{1,253}))", line)
+        if notification and notification.group(3) is not None:
+            code, site = int(notification.group(3)), notification.group(4)
+            def show_error():
+                if not session.removed and (attempt is None or attempt.active()):
+                    notice = Gio.Notification.new(tr("Security key"))
+                    notice.set_body(fido_error_message(code, site))
+                    notice.set_icon(Gio.ThemedIcon.new("dialog-warning-symbolic"))
+                    self.send_notification("fido-error", notice)
+                return GLib.SOURCE_REMOVE
+            GLib.idle_add(show_error)
+            return
+        if notification:
+            notification_id = "fido-" + notification.group(1)
+            pending = state.setdefault("fido_notifications", set())
+            if notification.group(2) == "touch":
+                pending.add(notification_id)
+                def show_touch():
+                    if not session.removed and (attempt is None or attempt.active()):
+                        notice = Gio.Notification.new(tr("Security key"))
+                        notice.set_body(tr("Touch your security key to continue."))
+                        # A host-theme name: the shell cannot see the Flatpak-exported app icon.
+                        notice.set_icon(Gio.ThemedIcon.new("dialog-password-symbolic"))
+                        self.send_notification(notification_id, notice)
+                    return GLib.SOURCE_REMOVE
+                GLib.idle_add(show_touch)
+            else:
+                pending.discard(notification_id)
+                GLib.idle_add(self.withdraw_notification, notification_id)
+            return
+        if "Monitor configuration virtual desktop " in line and " <= 0 <= " in line:
+            state["monitor_zero"] = True
+        if "ERRCONNECT_PRE_CONNECT_FAILED" in line:
+            state["preconnect_failed"] = True
         if not state["connected"] and "Logon Info" in line:
             state["connected"] = True
             decision = getattr(child, "_security_decision", None)
@@ -2411,6 +2740,7 @@ class AvdApp(Gtk.Application):
             self._set_status(tr("Connected to {resource}").format(resource=res['title']), session, attempt=attempt)
             self._set_connecting(res["id"], res["title"], False, session, attempt=attempt)  # desktop is up
         if line.startswith("Browse to: "):
+            state["auth_prompt"] = True
             url = line[len("Browse to: "):].strip()
             if config.is_aad_login_url(url):
                 # Resolve on the main thread (WebKit must run there). A local
@@ -2421,11 +2751,11 @@ class AvdApp(Gtk.Application):
                 # WebView has no smart-card reader, so the feed route's
                 # connection-time prompt failed cert validation there too. Route
                 # those through the system browser as well (issue #61).
-                # Commercial keeps the seamless SSO-cookie WebView (no paste),
-                # unless scheme-capture is forced on (then the browser path runs
-                # so the ms-appx-web redirect can be auto-captured).
+                # Respect the browser sign-in preference for commercial feeds too:
+                # the embedded WebView cannot authenticate with every security key.
                 use_browser = (session.local or config.CLOUD != "commercial"
-                               or self._scheme_connect(session))
+                               or self._scheme_connect(session)
+                               or self._use_browser_signin())
                 resolver = self._resolve_aad_browser if use_browser else self._resolve_aad
                 GLib.idle_add(resolver, master, url, res, session, attempt)
             else:
@@ -2455,11 +2785,18 @@ class AvdApp(Gtk.Application):
         wv = WebKit.WebView(network_session=self._web_session(session))
         self._apply_ua(wv)
         win = create(Gtk.Window, title=tr("Sign in — {resource}").format(resource=res['title']), transient_for=self.win)
-        win.set_default_size(520, 640)
-        win.set_child(wv)
+        # Wide enough for Entra's centred-card layout; narrower gets its mobile one.
+        win.set_default_size(760, 680)
+        win.set_child(self._signin_surface(wv, win, on_request=lambda: reveal()))
         holder = {"done": False, "shown": False, "timer": 0}
 
-        def finish(redirect_uri=None):
+        header = Gtk.HeaderBar()
+        browser_btn = create(Gtk.Button, label=tr("Use system browser"))
+        browser_btn.add_css_class("flat")
+        header.pack_end(browser_btn)
+        win.set_titlebar(header)
+
+        def finish(redirect_uri=None, browser=False):
             if holder["done"]:
                 return
             holder["done"] = True
@@ -2469,7 +2806,10 @@ class AvdApp(Gtk.Application):
             wv.stop_loading()
             if attempt is not None and attempt.close_auth is close_auth:
                 attempt.close_auth = None
-            if redirect_uri and not session.removed and (attempt is None or attempt.active()):
+            if browser:
+                # FreeRDP stays blocked on its prompt; the browser flow answers it.
+                GLib.idle_add(self._resolve_aad_browser, master, url, res, session, attempt, True)
+            elif redirect_uri and not session.removed and (attempt is None or attempt.active()):
                 try:
                     os.write(master, (redirect_uri + "\n").encode())
                 except OSError:
@@ -2481,6 +2821,8 @@ class AvdApp(Gtk.Application):
                 else:
                     attempt.cancel()
             win.destroy()
+
+        browser_btn.connect("clicked", lambda *_: finish(browser=True))
 
         def close_auth(*_):
             finish()
@@ -2504,16 +2846,23 @@ class AvdApp(Gtk.Application):
         win.connect("destroy", close_auth)
         if attempt is not None:
             attempt.close_auth = close_auth
+        # No login_hint here: without a prompt it sends Entra into Seamless SSO
+        # (Kerberos), which fails in the WebView with "Something went wrong".
         wv.load_uri(url)
+
+        def reveal():
+            if holder["done"] or holder["shown"]:
+                return
+            holder["shown"] = True
+            self._set_status(tr("Signing in to {resource}…").format(resource=res['title']), session, attempt=attempt)
+            win.present()
 
         def show_if_pending():
             holder["timer"] = 0
             if session.removed or (attempt is not None and not attempt.active()):
                 finish()
-            elif not holder["done"] and not holder["shown"]:
-                holder["shown"] = True
-                self._set_status(tr("Signing in to {resource}…").format(resource=res['title']), session, attempt=attempt)
-                win.present()
+            else:
+                reveal()
             return False
         holder["timer"] = GLib.timeout_add(3000, show_if_pending)
         return False
@@ -2609,7 +2958,7 @@ class AvdApp(Gtk.Application):
         shutil.copyfile(src, dst)
         return dst
 
-    def _resolve_aad_browser(self, master, url, res, session, attempt=None):
+    def _resolve_aad_browser(self, master, url, res, session, attempt=None, offer_in_app=False):
         """Service a connection-time 'Browse to:' prompt through the SYSTEM
         browser instead of the embedded WebView, so a smart card / CAC
         certificate can be presented (the WebView can't — issue #17). FreeRDP
@@ -2620,7 +2969,8 @@ class AvdApp(Gtk.Application):
         When scheme-capture is on, FreeRDP's redirect is the ms-appx-web broker
         URL, so the browser hands the code back to the app (do_open ->
         _deliver_scheme_conn -> this prompt's ``finish``) with no paste; the
-        paste field stays visible as a fallback."""
+        paste field stays visible as a fallback. ``offer_in_app`` (set when the
+        user came here from the in-app prompt) offers the way back to it."""
         if session.removed or (attempt is not None and not attempt.active()):
             if attempt is not None and not attempt.cancelled.is_set():
                 attempt.cancel()
@@ -2672,11 +3022,16 @@ class AvdApp(Gtk.Application):
         bind(paste_entry, 'placeholder_text', tr("Paste the sign-in address"))
         paste_go = create(Gtk.Button, label=tr("Sign in"))
         paste_go.add_css_class("suggested-action"); paste_go.set_halign(Gtk.Align.START)
-        for widget in (heading, intro, btnrow, paste_entry, paste_go):
+        # The in-app WebView only captures FreeRDP's native-client redirect, so
+        # there is no way back when the prompt uses the broker (scheme) redirect.
+        actions = sign_in_actions(win, lambda: finish(),
+                                  (lambda: finish(in_app=True))
+                                  if offer_in_app and not scheme else None)
+        for widget in (heading, intro, btnrow, paste_entry, paste_go, actions):
             box.append(widget)
         win.set_child(box)
 
-        def finish(redirect_uri=None):
+        def finish(redirect_uri=None, in_app=False):
             if done[0]:
                 return
             done[0] = True
@@ -2687,7 +3042,10 @@ class AvdApp(Gtk.Application):
                     pass
             if attempt is not None and attempt.close_auth is close_auth:
                 attempt.close_auth = None
-            if redirect_uri and not session.removed and (attempt is None or attempt.active()):
+            if in_app:
+                # FreeRDP stays blocked on its prompt; the in-app sign-in answers it.
+                GLib.idle_add(self._resolve_aad, master, url, res, session, attempt)
+            elif redirect_uri and not session.removed and (attempt is None or attempt.active()):
                 try:
                     os.write(master, (redirect_uri + "\n").encode())
                 except OSError:
@@ -2716,7 +3074,7 @@ class AvdApp(Gtk.Application):
             if frag:
                 finish(frag)
 
-        open_btn.connect("clicked", lambda *_: launch(url))
+        open_btn.connect("clicked", lambda *_: launch(config.with_login_hint(url, session.client.upn)))
         copy_btn.connect("clicked", do_copy)
         paste_go.connect("clicked", do_paste)
         paste_entry.connect("activate", do_paste)
@@ -2725,9 +3083,14 @@ class AvdApp(Gtk.Application):
             attempt.close_auth = close_auth
         if scheme:
             # Let do_open deliver the caught ms-appx-web redirect to this prompt.
-            waiter_box[0] = {"finish": finish, "attempt": attempt}
+            states = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("state", [])
+            if len(states) != 1 or not states[0]:
+                self._error(tr("Could not verify the connection sign-in state."))
+                finish()
+                return False
+            waiter_box[0] = {"finish": finish, "attempt": attempt, "state": states[0]}
             self._conn_scheme_waiters.append(waiter_box[0])
-        launch(url)                 # open immediately, like the manual flow
+        launch(config.with_login_hint(url, session.client.upn))  # open immediately, like the manual flow
         win.present()
         return False
 
@@ -2896,14 +3259,15 @@ class AvdApp(Gtk.Application):
         return None
 
     def _eff_ua(self):
-        """Resolve the sign-in webview User-Agent, or "" for the device's own
-        WebKit UA. It is a single account-wide value (the Default setting): every
+        """Resolve the sign-in webview User-Agent; "auto" is Chrome on Linux,
+        the identity Entra offers security keys to. It is a single account-wide
+        value (the Default setting): every
         sign-in webview shares one persistent SSO cookie session, so they must
         all present the same identity or Entra refuses the silent token. A
         per-resource UA would only ever work when it equalled this, so there
         isn't one — this covers the account sign-in and every connection."""
         dv = self._settings.get("_default", {}).get("user_agent", "auto")
-        return dv if dv and dv != "auto" else ""
+        return dv if dv and dv != "auto" else storage.UA_LINUX_CHROME
 
     def _apply_ua(self, wv):
         """Spoof the sign-in webview's User-Agent when configured (issue #28)."""

@@ -112,7 +112,7 @@ def test_switch_and_late_results_preserve_owner_and_process(app):
 def test_cancel_add_keeps_previous_selection(app, monkeypatch):
     a = add_saved(app, 'a', 'a@example.com')
     app._select_account(a.id)
-    monkeypatch.setattr(app, '_interactive_signin', lambda owner: None)
+    monkeypatch.setattr(app, '_interactive_signin', lambda owner, **_: None)
     app._add_account()
     pending = app._adding
     assert pending is not a
@@ -125,7 +125,7 @@ def test_cancel_add_keeps_previous_selection(app, monkeypatch):
 def test_duplicate_add_reuses_profile(app, monkeypatch):
     a = add_saved(app, 'a', 'a@example.com')
     app._select_account(a.id)
-    monkeypatch.setattr(app, '_interactive_signin', lambda owner: None)
+    monkeypatch.setattr(app, '_interactive_signin', lambda owner, **_: None)
     app._add_account()
     app._finish_signin(app._adding, response('a', 'a@example.com'))
     assert app.current is a
@@ -358,6 +358,121 @@ def test_repeated_gui_connections_preserve_each_log(app, tmp_path, monkeypatch):
     drain()
 
 
+def test_freerdp_keeps_x11_while_passing_wayland_to_security_dialog(app, tmp_path, monkeypatch):
+    owner = add_saved(app, 'display-test', 'test@example.test')
+    app._select_account(owner.id)
+    resource = owner.resources[0]
+    child = app._child_for(resource['id'], owner)
+    rdp = tmp_path / 'desktop.rdp'
+    rdp.write_text('full address:s:host\n')
+    result = tmp_path / 'environment'
+    client = tmp_path / 'fake-freerdp'
+    client.write_text(
+        '#!/usr/bin/python3\n'
+        'import os\n'
+        'from pathlib import Path\n'
+        f'Path({str(result)!r}).write_text("|".join((os.getenv("SDL_VIDEODRIVER", ""), '
+        'os.getenv("GDK_BACKEND", ""), os.getenv("WAYLAND_DISPLAY", ""), '
+        'os.getenv("AVD_PICKER_WAYLAND_DISPLAY", ""))))\n'
+    )
+    client.chmod(0o755)
+    monkeypatch.setenv('WAYLAND_DISPLAY', 'wayland-test')
+    monkeypatch.setattr(gui.config, 'SDL', str(client))
+    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(app, '_ensure_token', lambda session: True)
+    monkeypatch.setattr(owner.client, 'download_rdp', lambda token, res: str(rdp))
+
+    app._launch(child, resource, False, owner)
+
+    assert result.read_text() == 'x11|x11||wayland-test'
+    drain()
+
+
+@pytest.mark.parametrize(
+    ('failures', 'width', 'prompt', 'expected_launches', 'expected_errors'),
+    [(2, 0, False, 3, 0), (3, 0, False, 3, 1),
+     (3, 100, False, 1, 0), (3, 0, True, 1, 0)],
+)
+def test_zero_sized_monitor_retries_are_bounded(
+        app, tmp_path, monkeypatch, failures, width, prompt, expected_launches, expected_errors):
+    from avd_feed_connect.rdp.attempt import ConnectionAttempt
+
+    owner = add_saved(app, 'a', 'a@example.com')
+    app._select_account(owner.id)
+    resource = owner.resources[0]
+    child = app._child_for(resource['id'], owner)
+    rdp = tmp_path / 'desktop.rdp'
+    rdp.write_text('full address:s:host\n')
+    counter = tmp_path / 'launch-count'
+    client = tmp_path / 'fake-freerdp'
+    client.write_text(
+        '#!/usr/bin/python3\n'
+        'from pathlib import Path\n'
+        f'counter = Path({str(counter)!r})\n'
+        'n = int(counter.read_text()) + 1 if counter.exists() else 1\n'
+        'counter.write_text(str(n))\n'
+        f'if n <= {failures}:\n'
+        f' if {prompt}:\n'
+        '  print("Browse to: https://example.invalid/")\n'
+        f' print("Monitor configuration virtual desktop width must be 200 <= {width} <= 32766")\n'
+        ' print("ERRCONNECT_PRE_CONNECT_FAILED")\n'
+        'else:\n'
+        ' print("Logon Info")\n')
+    client.chmod(0o755)
+    monkeypatch.setattr(gui.config, 'SDL', str(client))
+    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(app, '_ensure_token', lambda session: True)
+    monkeypatch.setattr(owner.client, 'download_rdp', lambda token, res: str(rdp))
+    errors = []
+    monkeypatch.setattr(app, '_error', errors.append)
+    attempt = ConnectionAttempt()
+    child._attempt = attempt
+    attempt.is_current = lambda: child._attempt is attempt
+    monkeypatch.setattr(attempt.cancelled, 'wait', lambda timeout: False)
+
+    app._launch(child, resource, False, owner, attempt)
+
+    assert int(counter.read_text()) == expected_launches
+    assert len(errors) == expected_errors
+    if errors:
+        assert 'usable display' in str(errors[0])
+
+
+def test_zero_sized_monitor_retry_respects_cancellation(app, tmp_path, monkeypatch):
+    from avd_feed_connect.rdp.attempt import ConnectionAttempt
+
+    owner = add_saved(app, 'a', 'a@example.com')
+    app._select_account(owner.id)
+    resource = owner.resources[0]
+    child = app._child_for(resource['id'], owner)
+    rdp = tmp_path / 'desktop.rdp'
+    rdp.write_text('full address:s:host\n')
+    client = tmp_path / 'fake-freerdp'
+    client.write_text(
+        '#!/usr/bin/python3\n'
+        'print("Monitor configuration virtual desktop width must be 200 <= 0 <= 32766")\n'
+        'print("ERRCONNECT_PRE_CONNECT_FAILED")\n')
+    client.chmod(0o755)
+    monkeypatch.setattr(gui.config, 'SDL', str(client))
+    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(app, '_ensure_token', lambda session: True)
+    launches = []
+    monkeypatch.setattr(owner.client, 'download_rdp',
+                        lambda token, res: (launches.append(res), str(rdp))[1])
+    attempt = ConnectionAttempt()
+    child._attempt = attempt
+    attempt.is_current = lambda: child._attempt is attempt
+    def cancel_during_retry(timeout):
+        app._cancel_connection(child, resource, owner, attempt)
+        return True
+    monkeypatch.setattr(attempt.cancelled, 'wait', cancel_during_retry)
+
+    app._launch(child, resource, False, owner, attempt)
+
+    assert len(launches) == 1
+    assert attempt.cancelled.is_set()
+
+
 def test_workspace_defaults_and_resource_off_persist(app, monkeypatch):
     monkeypatch.setenv('XDG_CURRENT_DESKTOP', 'GNOME')
     owner = add_saved(app, 'demo', 'alex@example.test')
@@ -401,6 +516,241 @@ def test_workspace_placement_only_on_first_logon(app):
         app._on_freerdp_line(child, resource, -1, 'Logon Info', state, owner)
     drain()
     placement.start.assert_called_once()
+
+
+def test_fido_touch_notification_is_shown_and_cleared(app, monkeypatch):
+    from types import SimpleNamespace
+
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    resource = owner.resources[0]
+    child = SimpleNamespace()
+    state = {'connected': True}
+    events = []
+    monkeypatch.setattr(app, 'send_notification', lambda ident, notice: events.append(('show', ident)))
+    monkeypatch.setattr(app, 'withdraw_notification', lambda ident: events.append(('clear', ident)))
+    icons = []
+    monkeypatch.setattr(gui.Gio.Notification, 'set_icon', lambda notice, icon: icons.append(icon.get_names()[0]))
+    app._on_freerdp_line(child, resource, -1, 'AVD_FIDO_NOTIFICATION 123 touch', state, owner)
+    app._on_freerdp_line(child, resource, -1, 'AVD_FIDO_NOTIFICATION 123 clear', state, owner)
+    drain()
+    assert events == [('show', 'fido-123'), ('clear', 'fido-123')]
+    assert icons == ['dialog-password-symbolic']
+    assert not state['fido_notifications']
+
+
+def test_fido_error_notification_explains_the_failure(app, monkeypatch):
+    from types import SimpleNamespace
+
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    resource = owner.resources[0]
+    state = {'connected': True}
+    shown = []
+    monkeypatch.setattr(app, 'send_notification',
+                        lambda ident, notice: shown.append((ident, notice)))
+    bodies = []
+    real_set_body = gui.Gio.Notification.set_body
+    monkeypatch.setattr(gui.Gio.Notification, 'set_body',
+                        lambda notice, body: (bodies.append(body), real_set_body(notice, body)))
+    icons = []
+    monkeypatch.setattr(gui.Gio.Notification, 'set_icon',
+                        lambda notice, icon: icons.append(icon.get_names()[0]))
+    for line in ('AVD_FIDO_NOTIFICATION 9 error 46 login.microsoft.com',
+                 'AVD_FIDO_NOTIFICATION 10 error 52 -',
+                 'AVD_FIDO_NOTIFICATION 11 error -9 -',
+                 'AVD_FIDO_NOTIFICATION 12 error 46 bad/site'):
+        app._on_freerdp_line(SimpleNamespace(), resource, -1, line, state, owner)
+    drain()
+    assert [ident for ident, _ in shown] == ['fido-error'] * 3
+    assert 'login.microsoft.com' in bodies[0] and 'passkey' in bodies[0]
+    assert 'reinsert' in bodies[1]
+    assert bodies[2] == 'The security key request failed.'
+    assert icons == ['dialog-warning-symbolic'] * 3
+    assert not state.get('fido_notifications')
+
+
+@pytest.mark.parametrize('browser_signin', [False, True])
+def test_connection_signin_respects_browser_preference(app, monkeypatch, browser_signin):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(gui.config, 'CLOUD', 'commercial')
+    monkeypatch.setattr(app, '_use_browser_signin', lambda: browser_signin)
+    monkeypatch.setattr(app, '_scheme_connect', lambda session: False)
+    scheduled = []
+    monkeypatch.setattr(gui.GLib, 'idle_add', lambda *args: scheduled.append(args))
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    resource = owner.resources[0]
+    child = SimpleNamespace()
+    app._on_freerdp_line(
+        child, resource, -1,
+        'Browse to: https://login.microsoftonline.com/common/oauth2/authorize',
+        {'connected': False}, owner,
+    )
+    expected = app._resolve_aad_browser if browser_signin else app._resolve_aad
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == expected
+
+
+def find_widget(widget, kind, label=None):
+    child = widget.get_first_child()
+    while child:
+        if isinstance(child, kind) and (label is None or child.get_label() == label):
+            return child
+        found = find_widget(child, kind, label)
+        if found:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def press_escape(window):
+    controllers = window.observe_controllers()
+    for index in range(controllers.get_n_items()):
+        controller = controllers.get_item(index)
+        if isinstance(controller, Gtk.ShortcutController):
+            for position in range(controller.get_n_items()):
+                shortcut = controller.get_item(position)
+                if shortcut.get_trigger().to_string() == 'Escape':
+                    return shortcut.get_action().activate(
+                        Gtk.ShortcutActionFlags.EXCLUSIVE, window, None)
+    pytest.fail('no Escape shortcut')
+
+
+@pytest.fixture
+def browser_flow(app, monkeypatch):
+    for name in ('AVD_SCHEME_SIGNIN', 'AVD_BROWSER_SIGNIN', 'AVD_DEVICE_CODE'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(gui.config, 'CLOUD', 'commercial')
+    monkeypatch.setattr(gui.Gio.AppInfo, 'launch_default_for_uri', lambda *a: None)
+    return app
+
+
+def test_mistaken_browser_signin_can_be_cancelled_without_changing_preference(browser_flow):
+    app = browser_flow
+    app._start_browser_signin()
+    dialog = app._signin_dlg
+    assert dialog is not None and app._adding is not None
+    assert find_widget(dialog, Gtk.Button, 'Use in-app sign-in')
+    find_widget(dialog, Gtk.Button, 'Cancel').emit('clicked')
+    drain()
+    assert app._signin_dlg is None and app._adding is None
+    assert not app._settings.get('_browser_signin')
+    assert not gui.storage.load_settings().get('_browser_signin')
+
+
+def test_browser_signin_hands_the_same_account_back_to_in_app(browser_flow, monkeypatch):
+    app = browser_flow
+    app._start_browser_signin()
+    pending = app._adding
+    calls = []
+    monkeypatch.setattr(app, '_interactive_signin',
+                        lambda session, **options: calls.append((session, options)))
+    find_widget(app._signin_dlg, Gtk.Button, 'Use in-app sign-in').emit('clicked')
+    drain()
+    assert calls == [(pending, {'browser': False})]
+    assert app._adding is pending
+    assert not app._settings.get('_browser_signin')
+
+
+def test_browser_shortcut_is_remembered_once_signin_succeeds(browser_flow, monkeypatch):
+    app = browser_flow
+    monkeypatch.setattr(app, '_browser_exchange', lambda *a: None)
+    app._start_browser_signin()
+    entry = find_widget(app._signin_dlg, Gtk.Entry)
+    entry.set_text('code-from-browser')
+    entry.emit('activate')
+    drain()
+    assert app._signin_dlg is None
+    assert gui.storage.load_settings().get('_browser_signin') is True
+
+
+def test_preferred_browser_signin_offers_only_cancel(browser_flow):
+    app = browser_flow
+    app._settings['_browser_signin'] = True
+    app._interactive_signin()
+    assert find_widget(app._signin_dlg, Gtk.Button, 'Cancel')
+    assert not find_widget(app._signin_dlg, Gtk.Button, 'Use in-app sign-in')
+
+
+def connection_prompt(app, monkeypatch, offer_in_app):
+    import threading
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(app, '_scheme_connect', lambda session: False)
+    cancelled = threading.Event()
+    attempt = SimpleNamespace(cancelled=cancelled, cancel=cancelled.set, close_auth=None,
+                              active=lambda: not cancelled.is_set())
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    resource = owner.resources[0]
+    read_fd, master = os.pipe()
+    os.set_blocking(read_fd, False)
+    url = 'https://login.microsoftonline.com/common/oauth2/authorize'
+    app._resolve_aad_browser(master, url, resource, owner, attempt, offer_in_app)
+    title = 'Sign in — ' + resource['title']
+    window = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == title)
+    return window, attempt, (master, url, resource, owner), read_fd
+
+
+def test_connection_browser_prompt_cancels_on_escape(browser_flow, monkeypatch):
+    window, attempt, (master, *_), read_fd = connection_prompt(browser_flow, monkeypatch, False)
+    assert not find_widget(window, Gtk.Button, 'Use in-app sign-in')
+    assert press_escape(window)
+    drain()
+    assert attempt.cancelled.is_set() and attempt.close_auth is None
+    with pytest.raises(BlockingIOError):
+        os.read(read_fd, 1)
+    os.close(read_fd); os.close(master)
+
+
+def test_connection_browser_prompt_returns_to_in_app_signin(browser_flow, monkeypatch):
+    app = browser_flow
+    window, attempt, args, read_fd = connection_prompt(app, monkeypatch, True)
+    scheduled = []
+    monkeypatch.setattr(gui.GLib, 'idle_add', lambda *a: scheduled.append(a))
+    find_widget(window, Gtk.Button, 'Use in-app sign-in').emit('clicked')
+    assert scheduled == [(app._resolve_aad, *args, attempt)]
+    assert not attempt.cancelled.is_set() and attempt.close_auth is None
+    with pytest.raises(BlockingIOError):
+        os.read(read_fd, 1)
+    os.close(read_fd); os.close(args[0])
+
+
+def test_scheme_capture_follows_the_browser_preference(app, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv('AVD_SCHEME_SIGNIN', raising=False)
+    monkeypatch.setattr(gui.config, 'CLOUD', 'commercial')
+    feed = SimpleNamespace(local=False)
+    monkeypatch.setattr(app, '_use_browser_signin', lambda: False)
+    assert not app._scheme_connect(feed)
+    monkeypatch.setattr(app, '_use_browser_signin', lambda: True)
+    assert app._scheme_connect(feed)
+    assert not app._scheme_connect(SimpleNamespace(local=True))
+
+
+def test_gateway_bearer_is_handed_to_every_feed_account():
+    from types import SimpleNamespace
+
+    inject = gui.AvdApp._inject_bearer
+    assert inject(SimpleNamespace(token='t', local=False))
+    assert not inject(SimpleNamespace(token='', local=False))
+    assert not inject(SimpleNamespace(token='t', local=True))
+
+
+def test_connection_scheme_redirect_matches_uri_and_state(app, monkeypatch):
+    delivered = []
+    monkeypatch.setattr(gui.GLib, 'idle_add', lambda callback, uri: callback(uri))
+    monkeypatch.setattr(app, '_toast', lambda *args, **kwargs: None)
+    older = {'state': 'first', 'finish': delivered.append, 'attempt': None}
+    newer = {'state': 'second', 'finish': delivered.append, 'attempt': None}
+    app._conn_scheme_waiters = [older, newer]
+    uri = gui.config.BROKER_REDIRECT
+    assert not app._deliver_scheme_conn('ms-appx-web://attacker/path?code=x&state=first')
+    assert not app._deliver_scheme_conn(uri + '?code=x&state=wrong')
+    assert not app._deliver_scheme_conn(uri + '?code=x&state=first&state=second')
+    assert app._deliver_scheme_conn(uri + '?code=x&state=first')
+    assert delivered == [uri + '?code=x&state=first']
+    assert app._conn_scheme_waiters == [newer]
+    assert not app._deliver_scheme_conn(uri + '?code=x&state=first')
 
 
 @pytest.mark.parametrize('resource_settings', [False, True])
@@ -1113,3 +1463,36 @@ def test_overlay_close_button_cancels_pending_attempt(app):
     button.emit('clicked');drain()
     assert attempt.cancelled.is_set()
     assert not app._connect_overlay.get_visible()
+
+
+def test_failed_tile_state_and_slash_filter(app):
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    owner.resources.append({'id': 'other', 'title': 'Build box', 'tenant': 'demo', 'type': 'Desktop'})
+    app._select_account(owner.id)
+    drain()
+    tile = owner.tiles['same']
+    app._set_tile_state('same', 'state-error', owner)
+    drain()
+    assert tile._pill.get_visible() and tile._pill.get_text() == 'FAILED'
+    assert tile._tile.has_css_class('tile-error') and (owner.id, 'same') not in app._sessions
+    app._set_tile_state('same', 'state-connecting', owner)
+    drain()
+    assert not tile._tile.has_css_class('tile-error') and not tile._pill.has_css_class('pill-error')
+    assert app._on_filter_shortcut() and app._filter.get_visible()
+    app._filter.set_text('BUILD')
+    app._apply_filter()
+    assert owner.tiles['other'].get_child_visible() and not tile.get_child_visible()
+    app._close_filter()
+    assert not app._filter.get_visible() and tile.get_child_visible()
+
+
+def test_omarchy_theme_change_restyles_live(app, monkeypatch):
+    tokens = {'dark': False, 'background': '#eff1f5', 'foreground': '#4c4f69', 'accent': '#1e66f5',
+              'border': '#1e66f5', 'menu_border': '#1e66f5', 'selected_text': '#1e66f5',
+              'error': '#d20f39', 'ok': '#40a02b', 'warn': '#df8e1d', 'normal_fill': 0.04,
+              'normal_border': 0.4, 'hover_fill': 0.08, 'hover_border': 0.25, 'selected_fill': 0.18,
+              'pressed_fill': 0.22, 'family': 'Test Mono', 'size': 12.0, 'radius': 0}
+    monkeypatch.setattr(gui.omarchy, 'load', lambda: tokens)
+    app._on_omarchy_changed()
+    assert app._omarchy is tokens and not app._is_dark()
+    assert 'Test Mono' in app._css_provider.to_string()

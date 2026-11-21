@@ -15,7 +15,34 @@ from datetime import datetime, timezone
 
 from .. import config
 from .security import resolve_security
-from .resources import set_rdp_dynamic_resolution, set_rdp_multimon
+from .resources import rdp_property, set_rdp_dynamic_resolution, set_rdp_multimon
+
+
+def webauthn_args(path, options=()):
+    """Redirect FIDO2 security keys (MS-RDPEWA) unless the .rdp turns it off.
+
+    Feed .rdp files omit ``redirectwebauthn``, so without this FreeRDP never
+    opens the channel and the remote session cannot see the key."""
+    if any(option.lower().startswith("/dvc:rdpewa") for option in options):
+        return []
+    if rdp_property(path, "redirectwebauthn") == "0":
+        return []
+    return ["/dvc:rdpewa"]
+
+
+def private_argument_file(argv):
+    """Keep FreeRDP arguments, including gateway tokens, out of the process list."""
+    if any("\n" in arg or "\r" in arg for arg in argv[1:]):
+        raise ValueError("FreeRDP arguments cannot contain newlines")
+    fd = os.memfd_create("freerdp-arguments", os.MFD_CLOEXEC)
+    try:
+        with os.fdopen(os.dup(fd), "wb") as stream:
+            stream.write(("\n".join(argv[1:]) + "\n").encode())
+        os.lseek(fd, 0, os.SEEK_SET)
+        return [argv[0], f"/args-from:fd:{fd}"], fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def session_log_path(output_dir, prefix):
@@ -145,6 +172,7 @@ def build_argv(sdl, path, upn):
         == "ignore" else "/cert:tofu"
     argv += ["/sound:sys:pulse", "/microphone", cert_flag,
              "/f", "/scale-desktop:200", "-multimon", "/log-level:info"]
+    argv += webauthn_args(path, decision.options)
     return argv
 
 

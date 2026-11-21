@@ -175,6 +175,20 @@ def is_aad_login_url(url):
         return False
 
 
+def with_login_hint(url, upn):
+    """``url`` with ``login_hint=upn`` added, so Entra goes straight to the
+    signed-in account instead of asking for an email. Left alone when there is
+    no account, the URL already names one, or it is not an Entra login URL."""
+    if not upn or not is_aad_login_url(url):
+        return url
+    parts = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    if any(key == "login_hint" for key, _ in query):
+        return url
+    query.append(("login_hint", upn))
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
+
+
 # Hosts a bearer token may be sent to. Feed XML supplies the feed, .rdp and icon
 # URLs, so they are checked before the Authorization header is attached. The set
 # is per-cloud (see CLOUDS) so a sovereign cloud accepts only its own hosts.

@@ -55,8 +55,8 @@ WORKSPACE_VALUES = ["auto", "on", "off"]
 WORKSPACE_DEFAULT_LABELS = ["Disabled", "Enabled"]
 WORKSPACE_DEFAULT_VALUES = ["off", "on"]
 
-# User-Agent presented by the embedded sign-in webview. "auto" leaves
-# WebKitGTK's own UA, which identifies as Linux — some tenants' Conditional
+# User-Agent presented by the embedded sign-in webview. "auto" presents as
+# Chrome on Linux (see UA_LINUX_CHROME) — some tenants' Conditional
 # Access policies ("require a compliant/Windows device" or "require Microsoft
 # Edge") then block the sign-in. Presenting as Edge/Chrome on Windows is the
 # same workaround people use with a browser UA-switcher extension (issue #28).
@@ -65,7 +65,12 @@ WORKSPACE_DEFAULT_VALUES = ["off", "on"]
 # same everywhere (the account sign-in and every connection) or Entra refuses
 # the silent token — hence no per-resource override. The stored value is the
 # literal UA string (or a preset below); "Custom…" needs no separate key,
-# "auto" means the device's own UA.
+# "auto" means UA_LINUX_CHROME: Entra only offers security-key / passkey
+# sign-in to browsers it recognises, and WebKitGTK's own "Safari on Linux" UA
+# is not one of them, so the WebAuthn bridge would never be asked for a key.
+UA_LINUX_CHROME = ("Mozilla/5.0 (X11; Linux x86_64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/132.0.0.0 Safari/537.36")
 UA_WINDOWS_EDGE = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0")

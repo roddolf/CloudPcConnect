@@ -82,7 +82,7 @@ from avd_feed_connect import config, display, http  # noqa: E402
 from avd_feed_connect.auth.oauth import _b64url  # noqa: E402
 from avd_feed_connect.client import AvdClient  # noqa: E402
 from avd_feed_connect.gui.workspaces import select_backend as workspace_backend  # noqa: E402
-from avd_feed_connect.gui.workspaces import HyprlandPlacement, HyprlandWorkspaceBackend, valid_workspace  # noqa: E402
+from avd_feed_connect.gui.workspaces import HyprlandWorkspaceBackend, valid_workspace  # noqa: E402
 from avd_feed_connect.gui import resource_groups  # noqa: E402
 from avd_feed_connect.gui import launchers, omarchy as omarchy_theme  # noqa: E402
 from avd_feed_connect.rdp.security import resolve_security  # noqa: E402
@@ -690,7 +690,8 @@ class AvdApp(Gtk.Application):
         for trigger, handler in (("<Control>r", self._on_refresh_shortcut),
                                  ("F5", self._on_refresh_shortcut),
                                  ("slash", self._on_filter_shortcut),
-                                 ("<Control>f", self._on_filter_shortcut)):
+                                 ("<Control>f", self._on_filter_shortcut),
+                                 ("question", self._on_shortcuts_shortcut)):
             keys.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string(trigger),
                                                Gtk.CallbackAction.new(handler)))
         self.win.add_controller(keys)
@@ -716,6 +717,22 @@ class AvdApp(Gtk.Application):
         brand.append(mark); brand.append(tbox)
         brand.set_valign(Gtk.Align.CENTER)
         hb.pack_start(brand)
+
+        shortcuts = Gtk.MenuButton(icon_name="help-about-symbolic")
+        shortcuts.add_css_class("iconbtn")
+        bind(shortcuts, 'tooltip_text', tr("Keyboard shortcuts"))
+        shortcut_pop = Gtk.Popover()
+        shortcut_pop.add_css_class("avd-menu")
+        shortcut_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                               margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        for label in (tr("Arrow keys: move between resources"),
+                      tr("Enter: connect"), tr("/ or Ctrl+F: search"),
+                      tr("Ctrl+R or F5: refresh"), tr("Escape: clear search")):
+            shortcut_box.append(create(Gtk.Label, label=label, xalign=0))
+        shortcut_pop.set_child(shortcut_box)
+        shortcuts.set_popover(shortcut_pop)
+        self._shortcuts_button = shortcuts
+        hb.pack_end(shortcuts)
 
         # account menu button (avatar + who + caret), opens the saved account list
         menu_btn = Gtk.MenuButton(); menu_btn.add_css_class("acct-btn")
@@ -1072,6 +1089,49 @@ class AvdApp(Gtk.Application):
         self._filter.grab_focus()
         return True
 
+    def _on_shortcuts_shortcut(self, *_):
+        self._shortcuts_button.popup()
+        return True
+
+    def _collapsed(self, account_id, key):
+        return bool(self._settings.get("_collapsed_sections", {}).get(account_id, {}).get(key))
+
+    def _set_expanded(self, control, expanded):
+        control._content.set_visible(expanded)
+        control._arrow.set_from_icon_name("pan-down-symbolic" if expanded else "pan-end-symbolic")
+        control.set_active(expanded)
+
+    def _collapse_button(self, caption, account_id, key, content):
+        button = Gtk.ToggleButton()
+        button.add_css_class("section-toggle")
+        button.set_child(caption)
+        button._content = content
+        button._arrow = caption.get_first_child()
+        button._collapse_id = (account_id, key)
+        self._set_expanded(button, not self._collapsed(account_id, key)
+                           or getattr(self, "_filtering_active", False))
+
+        def toggled(control):
+            expanded = control.get_active()
+            control._content.set_visible(expanded)
+            control._arrow.set_from_icon_name("pan-down-symbolic" if expanded else "pan-end-symbolic")
+            saved = self._settings.setdefault("_collapsed_sections", {}).setdefault(account_id, {})
+            if expanded:
+                saved.pop(key, None)
+            else:
+                saved[key] = True
+            storage.save_settings(self._settings)
+
+        button._collapse_handler = button.connect("toggled", toggled)
+        return button
+
+    def _set_filter_expansion(self, button, expanded):
+        button.handler_block(button._collapse_handler)
+        try:
+            self._set_expanded(button, expanded)
+        finally:
+            button.handler_unblock(button._collapse_handler)
+
     @staticmethod
     def _facet_factory(max_chars):
         """Labels for a facet drop-down; the button ellipsizes, the list does not."""
@@ -1143,6 +1203,15 @@ class AvdApp(Gtk.Application):
         self._apply_filter()
 
     def _apply_filter(self):
+        filtering = bool(self._filter.get_text().strip() or any(self._filter_values().values()))
+        changed = filtering != getattr(self, "_filtering_active", False)
+        self._filtering_active = filtering
+        if changed:
+            for kind_box in getattr(self, "_kind_boxes", []):
+                for button in [kind_box._toggle] + [group._toggle for group in kind_box._groups
+                                                   if group._toggle is not None]:
+                    account_id, key = button._collapse_id
+                    self._set_filter_expansion(button, filtering or not self._collapsed(account_id, key))
         for grid in {t.get_parent() for t in self._tiles if t.get_parent() is not None}:
             grid.invalidate_filter()
         shown = 0
@@ -1176,6 +1245,36 @@ class AvdApp(Gtk.Application):
             if child.get_child_visible() and child.get_mapped():
                 child.grab_focus()
                 return
+
+    def _on_tile_key(self, _controller, key, _keycode, state, child):
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK |
+                    Gdk.ModifierType.SUPER_MASK):
+            return False
+        direction = {Gdk.KEY_Left: (-1, 0), Gdk.KEY_Right: (1, 0),
+                     Gdk.KEY_Up: (0, -1), Gdk.KEY_Down: (0, 1)}.get(key)
+        if direction is None:
+            return False
+        ok, rect = child.compute_bounds(self._resource_box)
+        if not ok:
+            return False
+        x, y = rect.get_x() + rect.get_width() / 2, rect.get_y() + rect.get_height() / 2
+        candidates = []
+        for other in self._tiles:
+            if other is child or not other.get_mapped() or not other.get_child_visible():
+                continue
+            valid, bounds = other.compute_bounds(self._resource_box)
+            if not valid:
+                continue
+            dx = bounds.get_x() + bounds.get_width() / 2 - x
+            dy = bounds.get_y() + bounds.get_height() / 2 - y
+            if direction[0] and dx * direction[0] > 1 and abs(dy) < rect.get_height() / 2:
+                candidates.append(((abs(dx), abs(dy)), other))
+            elif direction[1] and dy * direction[1] > rect.get_height() / 2:
+                candidates.append(((abs(dy), abs(dx)), other))
+        if not candidates:
+            return False
+        min(candidates, key=lambda item: item[0])[1].grab_focus()
+        return True
 
     def _empty_state(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
@@ -1381,6 +1480,16 @@ class AvdApp(Gtk.Application):
         silent SSO). Returns the widget to put in the window."""
         from avd_feed_connect.gui.signin_panel import SignInPanel
         from avd_feed_connect.gui.webauthn import WebAuthnBridge
+        # Sign-in pages need no GPU, and a GPU-composited web process can come
+        # back from suspend drawing nothing (a blank sign-in window).
+        try:
+            wv.get_settings().set_hardware_acceleration_policy(
+                WebKit.HardwareAccelerationPolicy.NEVER)
+        except (AttributeError, TypeError):
+            pass
+        # A crashed or killed web process leaves the page blank; load it again.
+        wv.connect("web-process-terminated",
+                   lambda view, _reason: GLib.idle_add(lambda: view.reload() and False))
         panel = SignInPanel()
         bridge = WebAuthnBridge(wv, panel, on_request=on_request).attach()
         # GTK 4 does not emit "destroy" from gtk_window_destroy() while Python
@@ -1391,6 +1500,21 @@ class AvdApp(Gtk.Application):
         overlay.set_child(wv)
         overlay.add_overlay(panel)
         return overlay
+
+    def _signin_header(self, window, title=None):
+        window.add_css_class("avd-signin")
+        header = Gtk.HeaderBar()
+        header.add_css_class("avd-header")
+        heading = create(Gtk.Label, label=title if title is not None else window.get_title())
+        heading.add_css_class("brand-title")
+        heading.set_ellipsize(Pango.EllipsizeMode.END)
+        header.set_title_widget(heading)
+        browser = create(Gtk.Button, label=tr("Use system browser"))
+        browser.add_css_class("flat")
+        browser.add_css_class("signin-browser")
+        header.pack_end(browser)
+        window.set_titlebar(header)
+        return browser
 
     def _use_browser_signin(self):
         """True when sign-in should go through the system browser (auth-code +
@@ -1473,11 +1597,7 @@ class AvdApp(Gtk.Application):
         got_code = [False]
         handoff = [False]
 
-        header = Gtk.HeaderBar()
-        browser_btn = create(Gtk.Button, label=tr("Use system browser"))
-        browser_btn.add_css_class("flat")
-        header.pack_end(browser_btn)
-        dlg.set_titlebar(header)
+        browser_btn = self._signin_header(dlg, tr("Sign in"))
 
         def use_browser(*_):
             # Hand this same account over to the browser flow; it must not be
@@ -2202,24 +2322,32 @@ class AvdApp(Gtk.Application):
                 kind_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
                 kind_box._groups = []
                 caption = Gtk.Box(spacing=8, margin_start=22, margin_end=22)
+                caption.append(Gtk.Image.new_from_icon_name("pan-down-symbolic"))
                 heading = create(Gtk.Label, label=tr(resource_groups.KIND_LABELS[kind]).upper(), xalign=0)
                 heading.add_css_class("section-h")
                 caption.append(heading)
                 kind_box._count = Gtk.Label(xalign=0)
                 kind_box._count.add_css_class("section-count")
                 caption.append(kind_box._count)
-                kind_box.append(caption)
                 group_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+                kind_box._toggle = self._collapse_button(caption, owner.id, "section:" + kind, group_box)
+                kind_box.append(kind_box._toggle)
                 kind_box.append(group_box)
                 kinds.append(kind_box)
                 self._kind_boxes.append(kind_box)
                 for workspace, resources in groups:
                     group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
                     group._count = None
+                    group._toggle = None
+                    grid = Gtk.FlowBox(valign=Gtk.Align.START, max_children_per_line=5,
+                                       min_children_per_line=2, row_spacing=14, column_spacing=14,
+                                       homogeneous=True, selection_mode=Gtk.SelectionMode.NONE,
+                                       margin_start=22, margin_end=22)
                     if workspace:
                         # Workspace subgroup: a lighter, mixed-case heading with a
                         # hairline so it reads as subordinate to the section caption.
                         sub = Gtk.Box(spacing=8, margin_start=22, margin_end=22)
+                        sub.append(Gtk.Image.new_from_icon_name("pan-down-symbolic"))
                         label = Gtk.Label(label=workspace, xalign=0, wrap=True)
                         label.add_css_class("subsection-h")
                         sub.append(label)
@@ -2229,11 +2357,8 @@ class AvdApp(Gtk.Application):
                         rule = Gtk.Separator(hexpand=True, valign=Gtk.Align.CENTER)
                         rule.add_css_class("subsection-rule")
                         sub.append(rule)
-                        group.append(sub)
-                    grid = Gtk.FlowBox(valign=Gtk.Align.START, max_children_per_line=5,
-                                       min_children_per_line=2, row_spacing=14, column_spacing=14,
-                                       homogeneous=True, selection_mode=Gtk.SelectionMode.NONE,
-                                       margin_start=22, margin_end=22)
+                        group._toggle = self._collapse_button(sub, owner.id, "workspace:" + workspace, grid)
+                        group.append(group._toggle)
                     grid.connect("child-activated", self._on_tile_activated)
                     grid.set_filter_func(self._filter_tile)
                     group.append(grid)
@@ -2363,6 +2488,10 @@ class AvdApp(Gtk.Application):
         child._pill = pill
         child._proc = None
         child._launching = False
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_tile_key, child)
+        child.add_controller(keys)
         bind(child, 'tooltip_text',
             tr("{resource} — {workspace}\nDouble-click to connect · right-click for this workspace's settings").format(
                 resource=res["title"], workspace=res["tenant"]))
@@ -2743,12 +2872,6 @@ class AvdApp(Gtk.Application):
                 hypr_workspace = wanted
                 workspace_title = "CloudPC-" + uuid.uuid4().hex[:12] + " " + res.get("title", "")
                 argv.append("/t:" + workspace_title)
-        elif res.get("type") == "Desktop" and self._eff("new_workspace", res, session) == "on" \
-                and backend is not None and backend.available():
-            workspace_title = "AVD-" + uuid.uuid4().hex
-            # Last option wins over any custom /t flag. No resource/account data
-            # enters the Shell bridge; the random title also works across PID namespaces.
-            argv.append("/t:" + workspace_title)
         # Launch under a PTY. With FreeRDP built WITHOUT its own AAD webview,
         # /sec:aad prints "Browse to: <url>" and reads the redirect URL back
         # from stdin — but only when it thinks it's attached to a terminal, so
@@ -2798,8 +2921,7 @@ class AvdApp(Gtk.Application):
                     follow=self._settings.get("_follow_workspace", True))
                 GLib.idle_add(child._workspace_placement.start)
             else:
-                child._workspace_placement = (backend.create_placement(proc, workspace_title)
-                                              if workspace_title else None)
+                child._workspace_placement = None
             child._proc = proc
             child._ptym = master
         if not attempt.publish(publish):
@@ -2956,8 +3078,7 @@ class AvdApp(Gtk.Application):
                 GLib.idle_add(remember)
             placement = getattr(child, "_workspace_placement", None)
             if placement:
-                GLib.idle_add(placement.on_connected if isinstance(placement, HyprlandPlacement)
-                              else placement.start)
+                GLib.idle_add(placement.on_connected)
             self._set_tile_state(res["id"], "state-connected", session, attempt=attempt)
             self._set_status(tr("Connected to {resource}").format(resource=res['title']), session, attempt=attempt)
             self._set_connecting(res["id"], res["title"], False, session, attempt=attempt)  # desktop is up
@@ -3012,11 +3133,7 @@ class AvdApp(Gtk.Application):
         win.set_child(self._signin_surface(wv, win, on_request=lambda: reveal()))
         holder = {"done": False, "shown": False, "timer": 0}
 
-        header = Gtk.HeaderBar()
-        browser_btn = create(Gtk.Button, label=tr("Use system browser"))
-        browser_btn.add_css_class("flat")
-        header.pack_end(browser_btn)
-        win.set_titlebar(header)
+        browser_btn = self._signin_header(win, tr("Sign in — {resource}").format(resource=res["title"]))
 
         def finish(redirect_uri=None, browser=False):
             if holder["done"]:
@@ -3793,20 +3910,7 @@ class AvdApp(Gtk.Application):
         shortcut_box.set_visible(hv == "custom")
         connection.append(shortcut_box)
 
-        workspace_values = storage.WORKSPACE_VALUES if res else storage.WORKSPACE_DEFAULT_VALUES
-        workspace_labels = storage.WORKSPACE_LABELS if res else storage.WORKSPACE_DEFAULT_LABELS
-        workspace_dd = create(Gtk.DropDown, model=strings([tr(label) for label in workspace_labels]))
-        workspace_value = cur.get("new_workspace", "auto" if res else "off")
-        workspace_dd.set_selected(workspace_values.index(workspace_value) if workspace_value in workspace_values else 0)
-        workspace_dd.set_sensitive(res is None or res.get("type") == "Desktop")
-        backend = workspace_backend()
-        hyprland = isinstance(backend, HyprlandWorkspaceBackend)
-        workspace_supported = backend is not None and not hyprland
-        workspace_note = help_text(tr("Desktop connections only. Requires the optional GNOME extension; switches to the new workspace when connected."))
-        workspace_row = field(placement, tr("Start connection in a new virtual desktop"), workspace_dd, workspace_note)
-        workspace_row.set_visible(workspace_supported)
-        workspace_note.set_visible(workspace_supported)
-        workspace_row.get_parent().set_visible(workspace_supported)
+        hyprland = isinstance(workspace_backend(), HyprlandWorkspaceBackend)
 
         # Hyprland: a fixed workspace per Cloud PC, and where this window opens.
         hypr_dd = None
@@ -3890,6 +3994,7 @@ class AvdApp(Gtk.Application):
         if res is not None and res.get("type") == "Desktop" and session is not None \
                 and not session.local:
             placement.append(self._launcher_controls(res, session, cur))
+        placement.set_visible(placement.get_first_child().get_next_sibling() is not None)
 
         # Enter in a text field saves (the default action) rather than dropping the edit.
         extra_entry = Gtk.Entry(activates_default=True)
@@ -3933,7 +4038,6 @@ class AvdApp(Gtk.Application):
                 "cert": storage.CERT_VALUES[cert_dd.get_selected()],
                 "sec": storage.SEC_VALUES[sec_dd.get_selected()],
                 "hotkeys": hotkeys,
-                "new_workspace": workspace_values[workspace_dd.get_selected()],
                 "extra_args": storage.drop_builtin_flags(extra_entry.get_text().strip()),
             }
             if ua_dd is not None:   # Default settings only; account-wide (issue #28)
@@ -3956,7 +4060,6 @@ class AvdApp(Gtk.Application):
             # drop an all-default entry so the file stays tidy
             if entry["scale"] == "auto" and entry["multimon"] == "auto" \
                     and entry["cert"] == "auto" and entry["sec"] == "auto" and entry["hotkeys"] == "auto" \
-                    and entry["new_workspace"] == ("auto" if res else "off") \
                     and entry.get("user_agent", "auto") == "auto" \
                     and entry.get("remoteapp", "auto") == "auto" \
                     and entry.get("hypr_workspace", "auto") == "auto" \

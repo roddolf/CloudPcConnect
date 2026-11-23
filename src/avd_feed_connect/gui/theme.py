@@ -71,8 +71,13 @@ def omarchy_palette(tokens):
 
 
 CSS_TEMPLATE = Template("""
-window.avd, window.avd-settings, popover.avd-menu, .avd-keyprompt { $font font-size:${fs_body}px; }
+window.avd, window.avd-settings, window.avd-signin, popover.avd-menu, .avd-keyprompt { $font font-size:${fs_body}px; }
 window.avd, .avd-page { background:@avd_bg; color:@avd_ink; }
+window.avd-signin { background:@avd_bg; color:@avd_ink; }
+headerbar.avd-header button.signin-browser { color:@avd_muted; background:none;
+  border:1px solid transparent; border-radius:${r}px; box-shadow:none; padding:4px 10px; }
+headerbar.avd-header button.signin-browser:hover { color:@avd_ink;
+  background:alpha(@avd_ink,$hover); border-color:alpha(@avd_ink,$hover_border); }
 
 headerbar.avd-header { background:@avd_bg; color:@avd_ink; border-bottom:1px solid @avd_border;
   box-shadow:none; min-height:44px; padding:4px 8px; }
@@ -122,6 +127,10 @@ box.linked > button:not(:first-child) { border-left-width:0; }
 
 .section-h { font-weight:bold; font-size:${fs_caption}px; letter-spacing:1px; color:@avd_muted; }
 .section-count { font-size:${fs_caption}px; color:@avd_faint; }
+button.section-toggle { background:none; border:1px solid transparent; box-shadow:none;
+  border-radius:${r}px; color:@avd_muted; padding:0; }
+button.section-toggle:hover { background:alpha(@avd_ink,$hover); color:@avd_ink; }
+button.section-toggle image { color:@avd_faint; -gtk-icon-size:12px; }
 .subsection-h { font-size:${fs_small}px; color:@avd_muted; }
 separator.subsection-rule { background:@avd_border; min-height:1px; }
 .count { font-size:${fs_small}px; color:@avd_faint; }

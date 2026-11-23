@@ -49,11 +49,6 @@ HOTKEY_LABELS = ["Automatic (FreeRDP default)", "Enabled (Right Shift + key)",
                  "Disabled (send all keys to the PC)", "Custom…", "FreeRDP defaults"]
 HOTKEY_VALUES = ["auto", "on", "off", "custom", "defaults"]
 
-# Workspace placement can inherit per resource; application defaults cannot.
-WORKSPACE_LABELS = ["Use Default settings", "Enabled", "Disabled"]
-WORKSPACE_VALUES = ["auto", "on", "off"]
-WORKSPACE_DEFAULT_LABELS = ["Disabled", "Enabled"]
-WORKSPACE_DEFAULT_VALUES = ["off", "on"]
 
 # User-Agent presented by the embedded sign-in webview. "auto" presents as
 # Chrome on Linux (see UA_LINUX_CHROME) — some tenants' Conditional

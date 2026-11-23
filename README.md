@@ -82,11 +82,17 @@ The main window lists resources in three sections:
 2. **Virtual desktops**: other Azure Virtual Desktop session desktops.
 3. **Apps**: RemoteApps, grouped under the workspace that publishes them.
 
+Click a section or app workspace heading to collapse or expand it. The app
+remembers your choices per account. Searching or filtering temporarily expands
+the results; clearing the filters restores your saved choices.
+
 The search box matches resource names, workspaces, apps and regions. Press
 `/` or `Ctrl+F` to focus it and `Escape` to clear it. Next to it are filters
 for resource type, region, workspace and app. Each filter lists only the
 choices that still match the others. A filter only appears when the feed has
 more than one choice for it, and the last choices are remembered.
+Use the arrow keys to move between visible tiles and Enter to connect. Press
+`?` or use the help button in the header to see the keyboard shortcuts.
 
 The feed has no region field. The region is read from the resource and
 workspace names (for example "Productivity Apps - West Europe"), so resources
@@ -151,6 +157,7 @@ Keys in the app-wide `settings.json`:
 |---|---|
 | `_default` | Defaults for every resource (scale, monitors, certificate checks, and so on) |
 | `_filters` | Last search filter choices |
+| `_collapsed_sections` | Collapsed sections and app workspaces, per account |
 | `_window_workspace` | Hyprland workspace for the main window, or `auto` |
 | `_follow_workspace` | Switch to a Cloud PC's workspace when it connects (`true`/`false`) |
 | `_theme`, `_language` | Appearance and language |
@@ -676,38 +683,6 @@ sent to [upstream](https://github.com/shakeelosmani/avd_feed_connect).
 
 MIT for this app's code, the same as upstream. Bundled components keep their own licenses (FreeRDP:
 Apache-2.0, SDL: Zlib).
-
-### Optional GNOME connection workspaces
-
-On GNOME, in **Default settings**, enable **Start connection in a new virtual desktop** to
-place desktop connections in separate GNOME workspaces. A resource's settings
-can inherit the default, enable it, or disable it. Remote apps are unaffected.
-The app switches to the session's workspace after successful logon. The default
-is disabled; without the companion extension, connections open normally. The
-option is hidden on other desktops, and saved enabled preferences do not invoke
-GNOME integration there. Backend selection is separate from the preference and
-launch lifecycle so future desktop integrations can supply their own capabilities;
-this release implements only GNOME. No generic Wayland support is assumed.
-
-GNOME Wayland requires the small companion Shell extension in
-`gnome-extension/avd-workspaces@avd-feed-connect` (GNOME Shell 50). To install it
-manually from a source checkout, copy that directory into
-`~/.local/share/gnome-shell/extensions/`, log out and back in, then enable
-**AVD connection workspaces** in GNOME Extensions. Installation and enablement
-are explicit user actions; the app never performs either automatically.
-The Flatpak manifest includes permission for the extension's dedicated D-Bus
-name. Existing installations need a build containing that permission.
-
-Placement uses an exact random FreeRDP window title rather than resource names
-or sandbox PIDs. It waits briefly for the desktop window after logon, reuses an
-empty trailing workspace when available, and otherwise appends one. Reconnects
-and focus actions reuse the session; failed launches create no workspace.
-No global workspace settings are changed and no workspace is deleted: GNOME
-reclaims empty dynamic workspaces normally; with fixed workspaces, an existing
-empty workspace is reserved, or placement falls back to the current workspace
-if none is available. The configured number of workspaces is preserved. On secondary monitors GNOME's existing
-“Workspaces on primary display only” preference still applies. Display hotplug
-windows created later by FreeRDP are outside the initial placement attempt.
 
 ### UI translations
 

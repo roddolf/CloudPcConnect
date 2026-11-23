@@ -86,7 +86,7 @@ def test_account_popover_contains_only_accounts_and_auth_actions(app):
     a = add_saved(app, 'a', 'a@example.com')
     app._select_account(a.id)
     drain()
-    assert labels(app._account_pop.get_child())[-2:] == ['Add account', 'Sign out']
+    assert labels(app._account_pop.get_child())[-3:] == ['Add account', 'Open a downloaded .rdp…', 'Sign out']
     text = app._account_rows.get_first_child().get_first_child().get_child()
     assert text.get_first_child().get_text() == '✓ example.com'
     assert text.get_last_child().get_text() == 'a@example.com'
@@ -474,49 +474,22 @@ def test_zero_sized_monitor_retry_respects_cancellation(app, tmp_path, monkeypat
     assert attempt.cancelled.is_set()
 
 
-def test_workspace_defaults_and_resource_off_persist(app, monkeypatch):
-    monkeypatch.setenv('XDG_CURRENT_DESKTOP', 'GNOME')
-    owner = add_saved(app, 'demo', 'alex@example.test')
-    app.selected_id = owner.id
-    resource = owner.resources[0]
-    app._settings['_default'] = {'new_workspace': 'on'}
-    assert app._eff('new_workspace', resource, owner) == 'on'
-    app._open_settings(resource, owner)
-    drain()
-    dialog = next(w for w in Gtk.Window.get_toplevels() if w.get_title().startswith('Settings —'))
-    widgets = []
-    def visit(widget):
-        widgets.append(widget)
-        child = widget.get_first_child()
-        while child:
-            visit(child)
-            child = child.get_next_sibling()
-    visit(dialog)
-    dropdown = next(w for w in widgets if isinstance(w, Gtk.DropDown)
-                    and w.get_model().get_string(0) == 'Use Default settings')
-    assert dropdown.get_selected() == 0
-    dropdown.set_selected(2)
-    next(w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() == 'Save').emit('clicked')
-    assert owner.resource_settings[resource['id']]['new_workspace'] == 'off'
-    assert app._eff('new_workspace', resource, owner) == 'off'
-
-
 def test_workspace_placement_only_on_first_logon(app):
     from types import SimpleNamespace
     from unittest.mock import Mock
     placement = Mock()
-    placement.start.return_value = False
+    placement.on_connected.return_value = False
     child = SimpleNamespace(_workspace_placement=placement)
     owner = add_saved(app, 'demo', 'alex@example.test')
     resource = owner.resources[0]
     state = {'connected': False}
     app._on_freerdp_line(child, resource, -1, 'Connection failed', state, owner)
     drain()
-    placement.start.assert_not_called()
+    placement.on_connected.assert_not_called()
     for _ in range(2):
         app._on_freerdp_line(child, resource, -1, 'Logon Info', state, owner)
     drain()
-    placement.start.assert_called_once()
+    placement.on_connected.assert_called_once()
 
 
 def test_fido_touch_notification_is_shown_and_cleared(app, monkeypatch):
@@ -754,35 +727,6 @@ def test_connection_scheme_redirect_matches_uri_and_state(app, monkeypatch):
     assert not app._deliver_scheme_conn(uri + '?code=x&state=first')
 
 
-@pytest.mark.parametrize('resource_settings', [False, True])
-def test_workspace_setting_hidden_outside_gnome(app, monkeypatch, resource_settings):
-    monkeypatch.setenv('XDG_CURRENT_DESKTOP', 'KDE')
-    monkeypatch.setenv('XDG_SESSION_DESKTOP', 'gnome')
-    owner = add_saved(app, 'demo', 'alex@example.test')
-    app.selected_id = owner.id
-    resource = owner.resources[0]
-    app._settings['_default'] = {'new_workspace': 'on'}
-    assert app._eff('new_workspace', resource, owner) == 'on'
-    assert gui.workspace_backend() is None
-    app._open_settings(resource if resource_settings else None, owner)
-    drain()
-    dialog = next(w for w in Gtk.Window.get_toplevels() if w != app.win)
-    labels = []
-    def visit(w):
-        if isinstance(w, Gtk.Label):
-            labels.append(w)
-        child = w.get_first_child()
-        while child:
-            visit(child)
-            child = child.get_next_sibling()
-    visit(dialog)
-    label = next(w for w in labels if w.get_text() == 'Start connection in a new virtual desktop')
-    assert not label.get_parent().get_visible()
-    note = next(w for w in labels if 'Requires the optional GNOME extension' in w.get_text())
-    assert not note.get_visible()
-    dialog.destroy()
-
-
 def test_unified_mode_preserves_selection_and_duplicate_resource_sessions(app):
     a, b = add_saved(app, 'a', 'a@example.com'), add_saved(app, 'b', 'b@example.com')
     app._select_account(a.id)
@@ -951,7 +895,7 @@ def test_renaming_other_unified_account_keeps_selected_header_identity(app, monk
     assert app._avatar_lbl.get_text() == 'AN'
     updates = []
     update = app._update_account
-    monkeypatch.setattr(app, '_update_account', lambda who: (updates.append(who), update(who)))
+    monkeypatch.setattr(app, '_update_account', lambda who, *rest: (updates.append(who), update(who, *rest)))
     app._edit_account_name(b)
     dialog = next(w for w in Gtk.Window.list_toplevels()
                   if w.get_title() == 'Edit account name' and w.get_transient_for() is app.win)
@@ -1092,9 +1036,6 @@ def test_language_selection_applies_live_and_preserves_sessions(app):
         while child:
             yield from descendants(child)
             child = child.get_next_sibling()
-    widgets = list(descendants(app.win))
-    dropdown = next(w for w in widgets if isinstance(w, Gtk.DropDown)
-                    and w.get_model().get_string(0) == 'System default')
     owner = add_saved(app, 'fictional', 'alex@example.test')
     app._select_account(owner.id)
     owner.resources = [{'id': 'desk', 'title': 'Save', 'tenant': 'Northstar', 'type': 'Desktop'}]
@@ -1112,7 +1053,10 @@ def test_language_selection_applies_live_and_preserves_sessions(app):
     app._open_settings(None)
     dialog = next(w for w in Gtk.Window.get_toplevels()
                   if w.get_title() == 'Default connection settings')
-    connection_dropdown = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown))
+    dropdown = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
+                    and w.get_model().get_string(0) == 'System default')
+    connection_dropdown = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
+                               and w is not dropdown)
     connection_dropdown.set_selected(3)
     unsaved_flags = next(w for w in descendants(dialog) if isinstance(w, Gtk.Entry)
                          and w.get_placeholder_text().startswith("advanced:"))
@@ -1486,6 +1430,74 @@ def test_failed_tile_state_and_slash_filter(app):
     assert app._count_lbl.get_text() == '1 of 2'
     app._close_filter()
     assert app._filter.get_text() == '' and tile.get_child_visible()
+
+
+def test_collapsed_sections_persist_and_search_temporarily_expands(app):
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    owner.resources = [
+        {'id': 'pc', 'title': 'Dev Box', 'tenant': 'devcenter-one / Project', 'type': 'Desktop'},
+        {'id': 'word', 'title': 'Word', 'tenant': 'Office', 'type': 'RemoteApp'},
+        {'id': 'excel', 'title': 'Excel', 'tenant': 'Office', 'type': 'RemoteApp'},
+    ]
+    app._select_account(owner.id)
+    apps = app._kind_boxes[-1]
+    workspace = apps._groups[0]
+    workspace._toggle.set_active(False)
+    apps._toggle.set_active(False)
+    assert not apps._toggle._content.get_visible()
+    assert not workspace._toggle._content.get_visible()
+    app._render_resources()
+    apps = app._kind_boxes[-1]
+    workspace = apps._groups[0]
+    assert not apps._toggle.get_active() and not workspace._toggle.get_active()
+    app._filter.set_text('Word')
+    app._apply_filter()
+    assert apps._toggle.get_active() and workspace._toggle.get_active()
+    assert owner.tiles['word'].get_child_visible() and not owner.tiles['excel'].get_child_visible()
+    app._filter.set_text('')
+    app._apply_filter()
+    assert not apps._toggle.get_active() and not workspace._toggle.get_active()
+    assert app._settings['_collapsed_sections'][owner.id]['workspace:Office']
+
+
+def test_arrow_navigation_crosses_sections_and_skips_collapsed(app, monkeypatch):
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    activated = []
+    monkeypatch.setattr(app, '_on_tile_activated', lambda _grid, child: activated.append(child))
+    owner.resources = [
+        {'id': 'pc', 'title': 'Dev Box', 'tenant': 'devcenter-one / Project', 'type': 'Desktop'},
+        {'id': 'word', 'title': 'Word', 'tenant': 'Office', 'type': 'RemoteApp'},
+        {'id': 'excel', 'title': 'Excel', 'tenant': 'Office', 'type': 'RemoteApp'},
+    ]
+    app._select_account(owner.id)
+    app.win.present()
+    drain()
+    pc, word, excel = (owner.tiles[key] for key in ('pc', 'word', 'excel'))
+    pc.grab_focus()
+    assert app._on_tile_key(None, gui.Gdk.KEY_Down, 0, 0, pc)
+    assert app.win.get_focus() is word
+    assert app._on_tile_key(None, gui.Gdk.KEY_Right, 0, 0, word)
+    assert app.win.get_focus() is excel
+    excel.activate()
+    assert activated == [excel]
+    app._kind_boxes[-1]._toggle.set_active(False)
+    drain()
+    assert not app._on_tile_key(None, gui.Gdk.KEY_Down, 0, 0, pc)
+    assert app._on_shortcuts_shortcut()
+    assert app._shortcuts_button.get_popover().get_visible()
+
+
+def test_signin_header_has_themed_title_and_browser_action(app):
+    window = Gtk.Window(title='Sign in — Dev Box')
+    browser = app._signin_header(window)
+    called = []
+    browser.connect('clicked', lambda *_: called.append(True))
+    browser.emit('clicked')
+    assert window.has_css_class('avd-signin')
+    assert window.get_titlebar().has_css_class('avd-header')
+    assert window.get_titlebar().get_title_widget().get_label() == 'Sign in — Dev Box'
+    assert called == [True]
+    window.destroy()
 
 
 def test_omarchy_theme_change_restyles_live(app, monkeypatch):

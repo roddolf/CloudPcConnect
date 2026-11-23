@@ -42,12 +42,6 @@ SEC_VALUES = ["auto", "aad", "nla"]
 # resources (see _open_settings); desktops are unaffected.
 REMOTEAPP_LABELS = ["Automatic (app window)", "Full desktop"]
 REMOTEAPP_VALUES = ["auto", "desktop"]
-# sdl-freerdp's own Right Shift + key shortcuts (D disconnects the session, Enter
-# toggles fullscreen). "auto" leaves FreeRDP's config untouched; "off" passes every
-# key through to the remote desktop.
-HOTKEY_LABELS = ["Automatic (FreeRDP default)", "Enabled (Right Shift + key)",
-                 "Disabled (send all keys to the PC)", "Custom…", "FreeRDP defaults"]
-HOTKEY_VALUES = ["auto", "on", "off", "custom", "defaults"]
 
 
 # User-Agent presented by the embedded sign-in webview. "auto" presents as

@@ -77,31 +77,11 @@ def build_display_args(path, extra, want_multimon):
         "/multimon" if want_multimon else "-multimon"] + options
 
 
-# sdl-freerdp reserves <modifier>+key for its own shortcuts (D disconnects, Enter
-# toggles fullscreen, ...), swallowing those keys before the remote sees them.
-# The modifier lives in its user config file, not on the command line.
-HOTKEY_MODIFIERS = {"on": ["KMOD_RSHIFT"], "off": ["KMOD_NONE"]}
-
-HOTKEY_MODIFIER_NAMES = {
-    "KMOD_LCTRL": "Left Ctrl", "KMOD_RCTRL": "Right Ctrl",
-    "KMOD_LSHIFT": "Left Shift", "KMOD_RSHIFT": "Right Shift",
-    "KMOD_LALT": "Left Alt", "KMOD_RALT": "Right Alt",
-    "KMOD_LGUI": "Left Super", "KMOD_RGUI": "Right Super",
-}
-HOTKEY_DEFAULTS = {
-    "SDL_Fullscreen": "SDL_SCANCODE_RETURN", "SDL_Minimize": "SDL_SCANCODE_M",
-    "SDL_Resizeable": "SDL_SCANCODE_R", "SDL_Grab": "SDL_SCANCODE_G",
-    "SDL_Disconnect": "SDL_SCANCODE_D",
-}
-HOTKEY_ACTIONS = {
-    "SDL_Fullscreen": "Toggle fullscreen", "SDL_Minimize": "Minimize",
-    "SDL_Resizeable": "Toggle resizing", "SDL_Grab": "Toggle input grab",
-    "SDL_Disconnect": "Disconnect",
-}
-HOTKEY_KEYS = ["SDL_SCANCODE_" + key for key in (
-    list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + [f"F{i}" for i in range(1, 13)]
-    + list("0123456789") + ["RETURN", "ESCAPE", "SPACE", "TAB", "BACKSPACE",
-                                "INSERT", "DELETE", "HOME", "END", "PAGEUP", "PAGEDOWN"])]
+# sdl-freerdp has its own shortcuts (Right Shift + Enter toggles fullscreen,
+# + D disconnects, ...) that swallow keys meant for the remote PC. Hyprland and
+# the app cover those actions, so KMOD_NONE turns every one of them off. The
+# setting only exists in FreeRDP's user config file, not on the command line.
+HOTKEY_KEYS = ("SDL_Fullscreen", "SDL_Resizeable", "SDL_Grab", "SDL_Disconnect", "SDL_Minimize")
 
 
 def sdl_config_path():
@@ -109,43 +89,19 @@ def sdl_config_path():
     return os.path.join(base, "freerdp", "sdl-freerdp.json")
 
 
-def apply_client_hotkeys(mode, path=None):
-    """Apply app-owned shortcuts on connect; preserve unrelated FreeRDP settings.
-
-    'auto' leaves the file alone. 'defaults' removes only managed overrides,
-    letting the installed FreeRDP version supply its own defaults.
-    """
-    bindings = {}
-    if isinstance(mode, dict):
-        modifiers = mode.get("modifiers")
-        bindings = mode.get("bindings")
-        if (not isinstance(modifiers, list) or not modifiers
-                or any(not isinstance(value, str) or value not in HOTKEY_MODIFIER_NAMES
-                       for value in modifiers)
-                or not isinstance(bindings, dict) or set(bindings) != set(HOTKEY_DEFAULTS)
-                or any(value not in HOTKEY_KEYS for value in bindings.values())
-                or len(set(bindings.values())) != len(bindings)):
-            return False
-    else:
-        modifiers = HOTKEY_MODIFIERS.get(mode) if isinstance(mode, str) else None
-        if modifiers is None and mode != "defaults":
-            return False
+def disable_client_hotkeys(path=None):
+    """Turn off sdl-freerdp's shortcuts; keep its other preferences."""
     path = path or sdl_config_path()
     try:
         with open(path) as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            return False
-    except FileNotFoundError:
-        data = {}
     except (OSError, ValueError):
-        return False
-    if mode == "defaults":
-        for key in ("SDL_KeyModMask", *HOTKEY_DEFAULTS):
-            data.pop(key, None)
-    else:
-        data["SDL_KeyModMask"] = modifiers
-        data.update(bindings)
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    for key in HOTKEY_KEYS:
+        data.pop(key, None)
+    data["SDL_KeyModMask"] = ["KMOD_NONE"]
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:

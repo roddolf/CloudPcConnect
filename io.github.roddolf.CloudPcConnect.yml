@@ -259,6 +259,8 @@ modules:
           # leaves a black band).
           - patches/freerdp-0003-sdl-window-to-correct-monitor.patch
           - patches/freerdp-0004-webauthn-account-picker.patch
+          # SDL_SCANCODE_NONE disables one client shortcut. The app uses it to
+          # drop Minimize, which Hyprland can't do (it only exits fullscreen).
 
   # ---- Teams call-optimization add-in (freerdp-teams-redir) --------------
   # Unofficial FreeRDP 3 DVC plugin: runs Teams call media on the LOCAL

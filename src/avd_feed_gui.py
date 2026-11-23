@@ -73,7 +73,7 @@ from gi.repository import GLib  # noqa: E402
 # "python3". Use the app id so docks match the .desktop file and window
 # managers can target the window with rules. Must run before GTK initializes.
 GLib.set_prgname(APP_ID)
-from gi.repository import Gtk, Gdk, GdkPixbuf, Gio, Pango  # noqa: E402
+from gi.repository import Gtk, Gdk, GdkPixbuf, Gio, GObject, Pango  # noqa: E402
 from gi.repository import WebKit  # noqa: E402
 
 # The feed/auth package is installed as a sibling directory next to this file.
@@ -89,9 +89,8 @@ from avd_feed_connect.rdp.security import resolve_security  # noqa: E402
 from avd_feed_connect.rdp.resources import local_resource  # noqa: E402
 from avd_feed_connect.rdp.attempt import ConnectionAttempt  # noqa: E402
 from avd_feed_connect.rdp.launcher import (  # noqa: E402
-    apply_client_hotkeys, build_display_args, private_argument_file, session_log_path,
-    webauthn_args,
-    HOTKEY_MODIFIER_NAMES, HOTKEY_DEFAULTS, HOTKEY_ACTIONS, HOTKEY_KEYS)
+    build_display_args, disable_client_hotkeys, private_argument_file, session_log_path,
+    webauthn_args)
 from avd_feed_connect.rdp.resources import (  # noqa: E402
     rdp_is_remoteapp, set_rdp_desktop_mode)
 from avd_feed_connect.i18n import _ as tr, ngettext, configure, LANGUAGES  # noqa: E402
@@ -112,6 +111,20 @@ HYPR_WORKSPACES = list(range(1, 11))
 APP_VERSION = "0.13.0"
 # LOCAL_PROFILE_ID (the synthetic account for user-opened .rdp files, issue #17)
 # is imported from avd_feed_connect.accounts, its single source of truth.
+
+
+def _url_path(uri):
+    """Scheme, host and path of a URL, for logs: the query can hold codes."""
+    parts = urllib.parse.urlsplit(uri or "")
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
+def _redirect_error(uri):
+    """(error, first line of error_description) from an Entra error redirect."""
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(uri or "").query)
+    error = (query.get("error") or ["unknown_error"])[0]
+    detail = (query.get("error_description") or [""])[0]
+    return error, detail.strip().splitlines()[0].strip() if detail.strip() else error
 
 
 def is_broker_redirect(uri):
@@ -726,7 +739,8 @@ class AvdApp(Gtk.Application):
         shortcut_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
                                margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         for label in (tr("Arrow keys: move between resources"),
-                      tr("Enter: connect"), tr("/ or Ctrl+F: search"),
+                      tr("Enter: connect"), tr("Menu or Shift+F10: resource actions"),
+                      tr("/ or Ctrl+F: search"),
                       tr("Ctrl+R or F5: refresh"), tr("Escape: clear search")):
             shortcut_box.append(create(Gtk.Label, label=label, xalign=0))
         shortcut_pop.set_child(shortcut_box)
@@ -1247,6 +1261,9 @@ class AvdApp(Gtk.Application):
                 return
 
     def _on_tile_key(self, _controller, key, _keycode, state, child):
+        if key == Gdk.KEY_Menu or (key == Gdk.KEY_F10 and state & Gdk.ModifierType.SHIFT_MASK):
+            self._show_resource_menu(child)
+            return True
         if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK |
                     Gdk.ModifierType.SUPER_MASK):
             return False
@@ -2475,8 +2492,27 @@ class AvdApp(Gtk.Application):
 
         tile.append(top); tile.append(meta)
 
+        # Session actions, shown while the session is connected.
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        actions.add_css_class("tile-actions")
+        actions.set_visible(False)
+        tile.append(actions)
+
         child = Gtk.FlowBoxChild()
         child.set_child(tile)
+        for icon, tip, callback in (
+                ("focus-windows-symbolic", tr("Show window"), lambda: self._focus_session(child)),
+                ("view-refresh-symbolic", tr("Reconnect"),
+                 lambda: self._disconnect_session(child, reconnect=True)),
+                ("system-log-out-symbolic", tr("Disconnect"), lambda: self._disconnect_session(child))):
+            button = Gtk.Button.new_from_icon_name(icon)
+            button.add_css_class("tile-action")
+            button.set_focus_on_click(False)
+            button.set_tooltip_text(tip)
+            button.update_property([Gtk.AccessibleProperty.LABEL], [GObject.Value(str, tip)])
+            button.connect("clicked", lambda _b, cb=callback: cb())
+            actions.append(button)
+        child._actions = actions
         child._account = session
         child._res = res
         child._img = img
@@ -2493,11 +2529,11 @@ class AvdApp(Gtk.Application):
         keys.connect("key-pressed", self._on_tile_key, child)
         child.add_controller(keys)
         bind(child, 'tooltip_text',
-            tr("{resource} — {workspace}\nDouble-click to connect · right-click for this workspace's settings").format(
+            tr("{resource} — {workspace}\nDouble-click to connect · right-click for actions").format(
                 resource=res["title"], workspace=res["tenant"]))
         rclick = Gtk.GestureClick()
         rclick.set_button(3)
-        rclick.connect("pressed", lambda g, n, x, y, r=res: self._open_settings(r, session))
+        rclick.connect("pressed", lambda g, n, x, y: self._show_resource_menu(child, x, y))
         child.add_controller(rclick)
         return child
 
@@ -2526,6 +2562,8 @@ class AvdApp(Gtk.Application):
             if not ch:
                 return
             pill, tile = ch._pill, ch._tile
+            if getattr(ch, "_actions", None) is not None:
+                ch._actions.set_visible(css == "state-connected")
             for name in ("pill-connecting", "pill-error"):
                 pill.remove_css_class(name)
             for name in ("tile-connected", "tile-error"):
@@ -2626,6 +2664,8 @@ class AvdApp(Gtk.Application):
         child._attempt = attempt
         attempt.is_current = lambda: getattr(child, "_attempt", None) is attempt
         child._launching = True
+        child._windowed = windowed
+        child._reconnect = False
         self._set_tile_state(res["id"], "state-connecting", session, attempt=attempt)
         self._set_status(tr("Connecting to {resource}…").format(resource=res['title']), session, attempt=attempt)
         self._set_connecting(res["id"], res["title"], True, session, attempt=attempt)
@@ -2811,7 +2851,7 @@ class AvdApp(Gtk.Application):
         cert_mode = os.environ.get("AVD_CERT", "").strip().lower() \
             or self._eff("cert", res, session)
         cert_flag = "/cert:ignore" if cert_mode == "ignore" else "/cert:tofu"
-        apply_client_hotkeys(self._eff("hotkeys", res, session))
+        disable_client_hotkeys()
         argv += ["/sound:sys:pulse", "/microphone", cert_flag,
                  f"/scale-desktop:{scale}", "/log-level:info",
                  # bandwidth/quality + resilience + keepalive:
@@ -2867,6 +2907,12 @@ class AvdApp(Gtk.Application):
         workspace_title = None
         hypr_workspace = None
         if isinstance(backend, HyprlandWorkspaceBackend):
+            # Hyprland has no xwayland-keyboard-grab, so FreeRDP's X keyboard grab
+            # (taken on pointer enter) only goes stale across workspace switches
+            # and leaves the session ignoring input. The cloudpc submap already
+            # passes shortcuts through to Windows.
+            if "grab-keyboard" not in extra:
+                argv.append("-grab-keyboard")
             wanted = self._eff("hypr_workspace", res, session)
             if res.get("type") == "Desktop" and valid_workspace(wanted):
                 hypr_workspace = wanted
@@ -3023,6 +3069,14 @@ class AvdApp(Gtk.Application):
         self._set_status(tr("{resource} session ended").format(resource=res['title']), session, attempt=attempt)
         GLib.timeout_add_seconds(
             6, lambda: (self._set_tile_state(res["id"], None, session, attempt=attempt), False)[1])
+        if getattr(child, "_reconnect", False):
+            child._reconnect = False
+            def reconnect():
+                if not session.removed and (attempt is None or attempt.is_current()):
+                    self._on_tile_activated(self.grid, child,
+                                            windowed=getattr(child, "_windowed", False))
+                return GLib.SOURCE_REMOVE
+            GLib.idle_add(reconnect)
 
     def _on_freerdp_line(self, child, res, master, line, state, session):
         """Handle one line of FreeRDP output (called from the reader thread)."""
@@ -3173,14 +3227,42 @@ class AvdApp(Gtk.Application):
                 return True
             if dtype == WebKit.PolicyDecisionType.NAVIGATION_ACTION:
                 uri = decision.get_navigation_action().get_request().get_uri()
+                print(f"aad sign-in: {_url_path(uri)}", file=sys.stderr)
                 if "nativeclient" in uri and "code=" in uri:
                     decision.ignore()
                     finish(uri)
                     return True
+                if "/oauth2/nativeclient" in uri:
+                    # Entra answered with an error instead of a code. Loading
+                    # the redirect would leave an empty page; say what failed.
+                    decision.ignore()
+                    signin_error(uri)
+                    return True
+            return False
+
+        def signin_error(uri):
+            error, message = _redirect_error(uri)
+            print(f"aad sign-in failed: {error} {' '.join(_re.findall(r'AADSTS[0-9]+', message))}",
+                  file=sys.stderr)
+            if error in ("interaction_required", "login_required", "consent_required") \
+                    and not holder.get("prompted"):
+                # Silent SSO was refused; ask Entra for the interactive page.
+                holder["prompted"] = True
+                sep = "&" if "?" in url else "?"
+                wv.load_uri(url + sep + "prompt=select_account")
+                reveal()
+                return
+            finish()
+            self._set_status(tr("Sign-in to {resource} failed: {error}").format(
+                resource=res["title"], error=message), session)
+
+        def on_load_failed(_view, _event, failing_uri, error):
+            print(f"aad sign-in load failed: {_url_path(failing_uri)} ({error.message})", file=sys.stderr)
             return False
 
         wv.connect("create", lambda *_a: None)
         wv.connect("decide-policy", on_decide)
+        wv.connect("load-failed", on_load_failed)
         win.connect("close-request", close_auth)
         win.connect("destroy", close_auth)
         if attempt is not None:
@@ -3569,21 +3651,93 @@ class AvdApp(Gtk.Application):
                     session.tiles[rid] = ch
             if ch:
                 self._on_tile_activated(self.grid, ch, windowed=kind == "connect-windowed")
-        elif kind in ("focus", "disconnect"):
+        elif kind in ("focus", "disconnect", "reconnect"):
             ch = self._child_for(rid, session)
-            proc = ch._proc if ch else None
-            if not proc or proc.poll() is not None:
+            if ch is None:
                 return
-            title = ch._res["title"]
             if kind == "focus":
-                if not x11focus.focus_pid(proc.pid):
-                    self._set_status(tr("Couldn't bring {resource} to the front").format(resource=title))
+                self._focus_session(ch)
             else:
+                self._disconnect_session(ch, reconnect=kind == "reconnect")
+
+    @staticmethod
+    def _session_running(child):
+        return bool(child._proc and child._proc.poll() is None)
+
+    def _focus_session(self, child):
+        if not self._session_running(child):
+            return
+        if not x11focus.focus_pid(child._proc.pid):
+            self._set_status(tr("Couldn't bring {resource} to the front").format(
+                resource=child._res["title"]), child._account)
+
+    def _disconnect_session(self, child, reconnect=False):
+        """End a running session; with ``reconnect`` start it again once it exits."""
+        proc = child._proc
+        if not self._session_running(child):
+            return
+        child._reconnect = reconnect
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)   # own session (start_new_session)
+        except (ProcessLookupError, PermissionError):
+            pass
+        title = child._res["title"]
+        self._set_status((tr("Reconnecting to {resource}…") if reconnect
+                          else tr("Disconnecting {resource}…")).format(resource=title),
+                         child._account)
+        def force():
+            if proc.poll() is None:
                 try:
-                    os.killpg(proc.pid, signal.SIGTERM)   # own session (start_new_session)
+                    os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-                self._set_status(tr("Disconnecting {resource}…").format(resource=title))
+            return GLib.SOURCE_REMOVE
+        GLib.timeout_add_seconds(10, force)
+
+    def _resource_actions(self, child):
+        """(label, callback) pairs for a tile's actions menu; None is a separator."""
+        session = child._account
+        res = child._res
+        if self._session_running(child):
+            actions = [(tr("Show window"), lambda: self._focus_session(child))]
+            if not session.removed:
+                actions.append((tr("Reconnect"), lambda: self._disconnect_session(child, reconnect=True)))
+            actions.append((tr("Disconnect"), lambda: self._disconnect_session(child)))
+        elif child._launching:
+            actions = [(tr("Cancel connection"), lambda: self._cancel_connection(
+                child, res, session, getattr(child, "_attempt", None)))]
+        else:
+            actions = [(tr("Connect"), lambda: self._on_tile_activated(self.grid, child)),
+                       (tr("Connect in a window"),
+                        lambda: self._on_tile_activated(self.grid, child, windowed=True))]
+        return actions + [None, (tr("Settings…"), lambda: self._open_settings(res, session))]
+
+    def _show_resource_menu(self, child, x=None, y=None):
+        pop = Gtk.Popover()
+        pop.add_css_class("avd-menu")
+        pop.set_has_arrow(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4,
+                      margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+        for entry in self._resource_actions(child):
+            if entry is None:
+                box.append(Gtk.Separator())
+                continue
+            label, callback = entry
+            button = create(Gtk.Button, label=label)
+            button.add_css_class("flat")
+            button.get_child().set_xalign(0)
+            button.connect("clicked", lambda _b, cb=callback: (pop.popdown(), cb()))
+            box.append(button)
+        pop.set_child(box)
+        pop.set_parent(child)
+        if x is not None:
+            rect = Gdk.Rectangle()
+            rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+            pop.set_pointing_to(rect)
+        pop.connect("closed", lambda p: GLib.idle_add(p.unparent))
+        child._menu = pop
+        pop.popup()
+        return pop
 
     # ---- per-resource settings -------------------------------------------
     def _eff(self, key, res, session=None):
@@ -3843,72 +3997,6 @@ class AvdApp(Gtk.Application):
             field(connection, tr("Open RemoteApp as"), remoteapp_dd, help_text(
                 tr("Full desktop opens the whole remote PC so you can launch the app yourself — use this if the app window never appears.")))
 
-        hk_dd = create(Gtk.DropDown, model=strings([tr(label) for label in storage.HOTKEY_LABELS]))
-        hv = cur.get("hotkeys", "auto")
-        custom_hotkeys = hv if isinstance(hv, dict) else {}
-        hv = "custom" if isinstance(hv, dict) else hv
-        hk_dd.set_selected(storage.HOTKEY_VALUES.index(hv) if hv in storage.HOTKEY_VALUES else 0)
-        field(connection, tr("Client shortcuts"), hk_dd, help_text(
-            tr("Right Shift + D disconnects. Choose Disabled to send all keys to the remote PC, or Custom to change shortcuts. All actions share the same modifiers.")))
-
-        shortcut_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        shortcut_box.add_css_class("settings-subpanel")
-        shortcut_note = create(Gtk.Label, label=tr("Hold all selected modifiers, then press the action key."),
-                               xalign=0, wrap=True)
-        shortcut_box.append(shortcut_note)
-        modifier_grid = Gtk.Grid(column_spacing=12, row_spacing=4)
-        modifier_checks = {}
-        selected_modifiers = custom_hotkeys.get("modifiers", ["KMOD_RCTRL", "KMOD_RSHIFT"])
-        for index, (modifier, label) in enumerate(HOTKEY_MODIFIER_NAMES.items()):
-            check = create(Gtk.CheckButton, label=tr(label))
-            check.set_active(modifier in selected_modifiers)
-            modifier_checks[modifier] = check
-            modifier_grid.attach(check, index % 2, index // 2, 1, 1)
-        shortcut_box.append(modifier_grid)
-        action_dropdowns = {}
-        for action, label in HOTKEY_ACTIONS.items():
-            value = custom_hotkeys.get("bindings", {}).get(action, HOTKEY_DEFAULTS[action])
-            labels = [key.removeprefix("SDL_SCANCODE_") for key in HOTKEY_KEYS]
-            if value not in HOTKEY_KEYS:
-                labels.append(str(value))
-            dropdown = Gtk.DropDown(model=Gtk.StringList.new(
-                labels))
-            dropdown.set_name(action)
-            dropdown.set_selected(HOTKEY_KEYS.index(value) if value in HOTKEY_KEYS
-                                  else len(HOTKEY_KEYS))
-            action_dropdowns[action] = dropdown
-            shortcut_box.append(self._form_row(tr(label), dropdown, width))
-        reset_shortcuts = create(Gtk.Button, label=tr("Restore FreeRDP shortcuts"))
-        reset_shortcuts.set_halign(Gtk.Align.END)
-        def reset_bindings(*_):
-            for modifier, check in modifier_checks.items():
-                check.set_active(modifier == "KMOD_RSHIFT")
-            for action, dropdown in action_dropdowns.items():
-                dropdown.set_selected(HOTKEY_KEYS.index(HOTKEY_DEFAULTS[action]))
-            hk_dd.set_selected(storage.HOTKEY_VALUES.index("defaults"))
-        reset_shortcuts.connect("clicked", reset_bindings)
-        shortcut_box.append(reset_shortcuts)
-        shortcut_error = create(Gtk.Label, label=tr("Select at least one modifier and a different key for each action."),
-                                xalign=0, wrap=True)
-        shortcut_error.add_css_class("error")
-        shortcut_box.append(shortcut_error)
-        custom_index = storage.HOTKEY_VALUES.index("custom")
-        def validate_shortcuts(*_):
-            valid = (any(check.get_active() for check in modifier_checks.values())
-                     and all(dd.get_selected() < len(HOTKEY_KEYS) for dd in action_dropdowns.values())
-                     and len({dd.get_selected() for dd in action_dropdowns.values()}) == len(action_dropdowns))
-            shortcut_error.set_visible(not valid)
-            save.set_sensitive(hk_dd.get_selected() != custom_index or valid)
-        def update_shortcuts(*_):
-            shortcut_box.set_visible(hk_dd.get_selected() == custom_index)
-            validate_shortcuts()
-        hk_dd.connect("notify::selected", update_shortcuts)
-        for check in modifier_checks.values():
-            check.connect("toggled", validate_shortcuts)
-        for dropdown in action_dropdowns.values():
-            dropdown.connect("notify::selected", validate_shortcuts)
-        shortcut_box.set_visible(hv == "custom")
-        connection.append(shortcut_box)
 
         hyprland = isinstance(workspace_backend(), HyprlandWorkspaceBackend)
 
@@ -3943,7 +4031,7 @@ class AvdApp(Gtk.Application):
                 storage.save_settings(self._settings)))
             follow = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             follow.append(follow_check)
-            hypr_note = help_text(tr("Pick a workspace for each Cloud PC in its own settings (right-click its tile)."))
+            hypr_note = help_text(tr("Pick a workspace for each Cloud PC in its own settings (right-click its tile, then Settings…)."))
             hypr_note.add_css_class("tile-sub")
             follow.append(hypr_note)
             placement.append(follow)
@@ -4024,20 +4112,11 @@ class AvdApp(Gtk.Application):
         save.add_css_class("suggested-action")
 
         def do_save(*_):
-            validate_shortcuts()
-            if not save.get_sensitive():
-                return
-            hotkeys = storage.HOTKEY_VALUES[hk_dd.get_selected()]
-            if hotkeys == "custom":
-                hotkeys = {"modifiers": [key for key, check in modifier_checks.items() if check.get_active()],
-                           "bindings": {action: HOTKEY_KEYS[dd.get_selected()]
-                                        for action, dd in action_dropdowns.items()}}
             entry = {
                 "scale": storage.SCALE_VALUES[scale_dd.get_selected()],
                 "multimon": storage.MULTIMON_VALUES[mm_dd.get_selected()],
                 "cert": storage.CERT_VALUES[cert_dd.get_selected()],
                 "sec": storage.SEC_VALUES[sec_dd.get_selected()],
-                "hotkeys": hotkeys,
                 "extra_args": storage.drop_builtin_flags(extra_entry.get_text().strip()),
             }
             if ua_dd is not None:   # Default settings only; account-wide (issue #28)
@@ -4059,7 +4138,7 @@ class AvdApp(Gtk.Application):
                     entry[kept] = live[kept]
             # drop an all-default entry so the file stays tidy
             if entry["scale"] == "auto" and entry["multimon"] == "auto" \
-                    and entry["cert"] == "auto" and entry["sec"] == "auto" and entry["hotkeys"] == "auto" \
+                    and entry["cert"] == "auto" and entry["sec"] == "auto" \
                     and entry.get("user_agent", "auto") == "auto" \
                     and entry.get("remoteapp", "auto") == "auto" \
                     and entry.get("hypr_workspace", "auto") == "auto" \
@@ -4074,7 +4153,6 @@ class AvdApp(Gtk.Application):
                 storage.save_settings(self._settings)
             dlg.destroy()
             self._set_status(tr("Settings saved — applies to your next connection"))
-        validate_shortcuts()
         save.connect("clicked", do_save)
         cancel.set_valign(Gtk.Align.CENTER)
         save.set_valign(Gtk.Align.CENTER)

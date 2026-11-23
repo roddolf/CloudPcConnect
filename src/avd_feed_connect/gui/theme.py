@@ -168,6 +168,12 @@ flowboxchild:focus-visible .tile { border-color:@avd_focus; box-shadow:inset 0 0
 .chipdot { min-width:6px; min-height:6px; border-radius:${r_dot}px; background:@avd_accent; }
 .chip-app .chipdot { background:@avd_warn; }
 .tile-sub { font-size:${fs_small}px; color:@avd_muted; }
+.tile-actions { margin-top:-4px; }
+button.tile-action { min-width:26px; min-height:26px; padding:0; border-radius:${r}px;
+  background:none; border:1px solid @avd_border; color:@avd_muted; box-shadow:none; }
+button.tile-action:hover { color:@avd_ink; border-color:alpha(@avd_ink,$hover_border);
+  background:alpha(@avd_ink,$hover); }
+button.tile-action:focus-visible { border-color:@avd_focus; }
 
 .status-pill { font-size:${fs_caption}px; font-weight:bold; letter-spacing:0.5px; padding:1px 6px;
   border-radius:${r}px; color:@avd_ok; background:alpha(@avd_ok,0.12);

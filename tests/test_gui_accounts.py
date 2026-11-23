@@ -341,7 +341,7 @@ def test_repeated_gui_connections_preserve_each_log(app, tmp_path, monkeypatch):
                       'print(pathlib.Path(sys.argv[1]).read_text(), end="", flush=True)\n')
     client.chmod(0o755)
     monkeypatch.setattr(gui.config, 'SDL', str(client))
-    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(gui, 'disable_client_hotkeys', lambda: None)
     monkeypatch.setattr(app, '_ensure_token', lambda session: True)
     monkeypatch.setattr(a.client, 'download_rdp', lambda token, res: str(rdp))
 
@@ -379,7 +379,7 @@ def test_freerdp_keeps_x11_while_passing_wayland_to_security_dialog(app, tmp_pat
     client.chmod(0o755)
     monkeypatch.setenv('WAYLAND_DISPLAY', 'wayland-test')
     monkeypatch.setattr(gui.config, 'SDL', str(client))
-    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(gui, 'disable_client_hotkeys', lambda: None)
     monkeypatch.setattr(app, '_ensure_token', lambda session: True)
     monkeypatch.setattr(owner.client, 'download_rdp', lambda token, res: str(rdp))
 
@@ -421,7 +421,7 @@ def test_zero_sized_monitor_retries_are_bounded(
         ' print("Logon Info")\n')
     client.chmod(0o755)
     monkeypatch.setattr(gui.config, 'SDL', str(client))
-    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(gui, 'disable_client_hotkeys', lambda: None)
     monkeypatch.setattr(app, '_ensure_token', lambda session: True)
     monkeypatch.setattr(owner.client, 'download_rdp', lambda token, res: str(rdp))
     errors = []
@@ -455,7 +455,7 @@ def test_zero_sized_monitor_retry_respects_cancellation(app, tmp_path, monkeypat
         'print("ERRCONNECT_PRE_CONNECT_FAILED")\n')
     client.chmod(0o755)
     monkeypatch.setattr(gui.config, 'SDL', str(client))
-    monkeypatch.setattr(gui, 'apply_client_hotkeys', lambda mode: None)
+    monkeypatch.setattr(gui, 'disable_client_hotkeys', lambda: None)
     monkeypatch.setattr(app, '_ensure_token', lambda session: True)
     launches = []
     monkeypatch.setattr(owner.client, 'download_rdp',
@@ -1150,132 +1150,6 @@ def descendants(widget):
         child = child.get_next_sibling()
 
 
-def test_custom_shortcuts_roundtrip_in_default_settings(app):
-    app._open_settings(None)
-    drain()
-    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'Default connection settings')
-    mode = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-                and w.get_model().get_string(0) == 'Automatic (FreeRDP default)')
-    mode.set_selected(3)
-    drain()
-    modifiers = {w.get_label(): w for w in descendants(dialog) if isinstance(w, Gtk.CheckButton)}
-    modifiers['Right Ctrl'].set_active(True)
-    modifiers['Right Shift'].set_active(True)
-    disconnect = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-                      and w.get_name() == 'SDL_Disconnect')
-    disconnect.set_selected(37)  # F12, after A-Z and F1-F11
-    next(w for w in descendants(dialog) if isinstance(w, Gtk.Button) and w.get_label() == 'Save').emit('clicked')
-    saved = gui.storage.load_settings()['_default']['hotkeys']
-    assert set(saved['modifiers']) == {'KMOD_RSHIFT', 'KMOD_RCTRL'}
-    assert saved['bindings']['SDL_Disconnect'] == 'SDL_SCANCODE_F12'
-    app._open_settings(None)
-    drain()
-    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'Default connection settings')
-    mode = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-                and w.get_model().get_string(0) == 'Automatic (FreeRDP default)')
-    assert mode.get_selected() == 3
-    dialog.destroy()
-
-
-
-def test_custom_shortcuts_validate_and_translate_live(app):
-    app._open_settings(None)
-    drain()
-    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'Default connection settings')
-    mode = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-                and w.get_model().get_string(0) == 'Automatic (FreeRDP default)')
-    mode.set_selected(3)
-    save = next(w for w in descendants(dialog) if isinstance(w, Gtk.Button) and w.get_label() == 'Save')
-    checks = [w for w in descendants(dialog) if isinstance(w, Gtk.CheckButton)]
-    for check in checks:
-        check.set_active(False)
-    assert not save.get_sensitive()
-    checks[1].set_active(True)
-    assert save.get_sensitive()
-    actions = {w.get_name(): w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-               and w.get_name().startswith('SDL_')}
-    actions['SDL_Disconnect'].set_selected(actions['SDL_Minimize'].get_selected())
-    assert not save.get_sensitive()
-    next(w for w in descendants(dialog) if isinstance(w, Gtk.Button)
-         and w.get_label() == 'Restore FreeRDP shortcuts').emit('clicked')
-    assert save.get_sensitive()
-    assert [check.get_label() for check in checks if check.get_active()] == ['Right Shift']
-    assert actions['SDL_Disconnect'].get_selected() == 3  # D
-    for language in ('es-AR', 'es-419', 'es-ES'):
-        app._set_language(language)
-        assert checks[1].get_label() == 'Ctrl derecho'
-        assert save.get_label() == 'Guardar'
-        assert any(isinstance(w, Gtk.Label) and w.get_text() == 'Restablecer atajos de FreeRDP'
-                   for w in descendants(dialog))
-        assert mode.get_selected() == 4
-    app._set_language('en')
-    dialog.destroy()
-
-
-def test_custom_shortcuts_inherit_and_override_per_resource(app):
-    owner = add_saved(app, 'a', 'a@example.com')
-    resource = owner.resources[0]
-    custom = {'modifiers': ['KMOD_RCTRL', 'KMOD_RSHIFT'], 'bindings': {
-        'SDL_Disconnect': 'SDL_SCANCODE_D', 'SDL_Minimize': 'SDL_SCANCODE_M',
-        'SDL_Fullscreen': 'SDL_SCANCODE_RETURN', 'SDL_Resizeable': 'SDL_SCANCODE_R',
-        'SDL_Grab': 'SDL_SCANCODE_G'}}
-    app._settings['_default'] = {'hotkeys': custom}
-    assert app._eff('hotkeys', resource, owner) == custom
-    owner.resource_settings[resource['id']] = {'hotkeys': 'off'}
-    assert app._eff('hotkeys', resource, owner) == 'off'
-    owner.resource_settings[resource['id']] = {'hotkeys': 'auto'}
-    assert app._eff('hotkeys', resource, owner) == custom
-
-
-def test_restore_shortcuts_persists_defaults_mode(app):
-    app._open_settings(None)
-    drain()
-    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'Default connection settings')
-    mode = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-                and w.get_model().get_string(0) == 'Automatic (FreeRDP default)')
-    mode.set_selected(3)
-    next(w for w in descendants(dialog) if isinstance(w, Gtk.Button)
-         and w.get_label() == 'Restore FreeRDP shortcuts').emit('clicked')
-    next(w for w in descendants(dialog) if isinstance(w, Gtk.Button)
-         and w.get_label() == 'Save').emit('clicked')
-    assert gui.storage.load_settings()['_default']['hotkeys'] == 'defaults'
-
-
-def test_unknown_saved_shortcut_blocks_save(app):
-    from avd_feed_connect.rdp.launcher import HOTKEY_DEFAULTS
-    app._settings['_default'] = {'hotkeys': {
-        'modifiers': ['KMOD_RSHIFT'],
-        'bindings': dict(HOTKEY_DEFAULTS, SDL_Disconnect='SDL_SCANCODE_UNKNOWN')}}
-    app._open_settings(None)
-    drain()
-    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'Default connection settings')
-    save = next(w for w in descendants(dialog) if isinstance(w, Gtk.Button) and w.get_label() == 'Save')
-    assert not save.get_sensitive()
-    dialog.destroy()
-
-
-def test_custom_shortcut_validation_follows_mode_values_when_reordered(app, monkeypatch):
-    pairs = list(zip(gui.storage.HOTKEY_VALUES, gui.storage.HOTKEY_LABELS))
-    pairs[2], pairs[3] = pairs[3], pairs[2]
-    monkeypatch.setattr(gui.storage, 'HOTKEY_VALUES', [value for value, _ in pairs])
-    monkeypatch.setattr(gui.storage, 'HOTKEY_LABELS', [label for _, label in pairs])
-    app._open_settings(None)
-    drain()
-    dialog = next(w for w in Gtk.Window.list_toplevels() if w.get_title() == 'Default connection settings')
-    mode = next(w for w in descendants(dialog) if isinstance(w, Gtk.DropDown)
-                and w.get_model().get_string(0) == 'Automatic (FreeRDP default)')
-    mode.set_selected(gui.storage.HOTKEY_VALUES.index('custom'))
-    save = next(w for w in descendants(dialog) if isinstance(w, Gtk.Button) and w.get_label() == 'Save')
-    checks = [w for w in descendants(dialog) if isinstance(w, Gtk.CheckButton)]
-    assert all(w.is_visible() for w in checks)
-    for check in checks:
-        check.set_active(False)
-    assert not save.get_sensitive()
-    mode.set_selected(gui.storage.HOTKEY_VALUES.index('off'))
-    assert save.get_sensitive()
-    dialog.destroy()
-
-
 def test_authentication_setting_roundtrip_and_inheritance(app):
     owner = add_saved(app, 'a', 'test@example.test')
     res = owner.resources[0]
@@ -1408,6 +1282,67 @@ def test_overlay_close_button_cancels_pending_attempt(app):
     button.emit('clicked');drain()
     assert attempt.cancelled.is_set()
     assert not app._connect_overlay.get_visible()
+
+
+def test_tile_actions_follow_session_state_and_reconnect_relaunches(app, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from gi.repository import Gdk
+    owner = add_saved(app, 'demo', 'alex@example.test')
+    app._select_account(owner.id)
+    drain()
+    tile = owner.tiles['same']
+
+    def menu_labels():
+        pop = app._show_resource_menu(tile)
+        result = labels(pop.get_child())
+        pop.popdown()
+        drain()
+        return result
+
+    assert menu_labels() == ['Connect', 'Connect in a window', 'Settings…']
+    assert app._on_tile_key(None, Gdk.KEY_F10, 0, Gdk.ModifierType.SHIFT_MASK, tile)
+    assert tile._menu.get_visible()
+    tile._menu.popdown()
+    drain()
+    assert not tile._actions.get_visible()
+
+    proc = SimpleNamespace(pid=4242, poll=lambda: None)
+    tile._proc = proc
+    app._set_tile_state('same', 'state-connected', owner)
+    drain()
+    assert tile._actions.get_visible()
+    assert menu_labels() == ['Show window', 'Reconnect', 'Disconnect', 'Settings…']
+
+    signals, launches = [], []
+    monkeypatch.setattr(gui.os, 'killpg', lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(gui.GLib, 'timeout_add_seconds', lambda *a: 0)
+    monkeypatch.setattr(app, '_on_tile_activated',
+                        lambda grid, child, windowed=False: launches.append((child, windowed)))
+    tile._windowed = True
+    buttons = []
+    button = tile._actions.get_first_child()
+    while button:
+        buttons.append(button)
+        button = button.get_next_sibling()
+    buttons[1].emit('clicked')            # Reconnect
+    assert signals == [(4242, gui.signal.SIGTERM)]
+
+    read_end, write_end = os.pipe()
+    os.close(write_end)                   # FreeRDP exited: the pty reaches EOF
+    tile._launching = True
+    app._watch_session(tile, tile._res, proc, read_end, str(tmp_path / 'session.log'), owner)
+    drain()
+    assert launches == [(tile, True)]
+    assert not tile._reconnect
+
+    buttons[2].emit('clicked')            # Disconnect ends without relaunching
+    read_end, write_end = os.pipe()
+    os.close(write_end)
+    app._watch_session(tile, tile._res, proc, read_end, str(tmp_path / 'second.log'), owner)
+    drain()
+    assert launches == [(tile, True)]
+    assert signals[-1] == (4242, gui.signal.SIGTERM)
+    tile._proc = None
 
 
 def test_failed_tile_state_and_slash_filter(app):
@@ -1575,3 +1510,12 @@ def test_settings_dialog_enter_in_text_field_saves(app):
         time.sleep(0.01)
     assert dialog not in Gtk.Window.list_toplevels()
     assert owner.resource_settings[owner.resources[0]['id']]['extra_args'] == '/bpp:16'
+
+
+def test_redirect_error_reads_entra_error_without_code():
+    uri = ("https://login.microsoftonline.com/common/oauth2/nativeclient?error=access_denied"
+           "&error_description=AADSTS53003%3a+Access+has+been+blocked.%0d%0aTrace+ID%3a+x")
+    assert gui._redirect_error(uri) == ("access_denied", "AADSTS53003: Access has been blocked.")
+    assert gui._redirect_error(
+        "https://login.microsoftonline.com/common/oauth2/nativeclient?error=login_required") \
+        == ("login_required", "login_required")

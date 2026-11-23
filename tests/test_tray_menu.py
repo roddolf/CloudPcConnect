@@ -26,10 +26,10 @@ def test_idle_resource_offers_connect_and_windowed():
         ("Connect", ("connect", "a")), ("Connect (windowed)", ("connect-windowed", "a"))]
 
 
-def test_connected_resource_offers_focus_and_disconnect():
+def test_connected_resource_offers_focus_reconnect_and_disconnect():
     vm = build_menu([_res("a", "Dev")], {"a": {"state": "connected", "running": True}})[1]
     assert vm["label"] == "● Dev"
-    assert [c["action"] for c in vm["children"]] == [("focus", "a"), ("disconnect", "a")]
+    assert [c["action"] for c in vm["children"]] == [("focus", "a"), ("reconnect", "a"), ("disconnect", "a")]
 
 
 def test_connecting_without_process_is_not_actionable():
@@ -40,7 +40,7 @@ def test_connecting_without_process_is_not_actionable():
 
 def test_connecting_with_process_can_be_focused_or_cancelled():
     vm = build_menu([_res("a", "Dev")], {"a": {"state": "connecting", "running": True}})[1]
-    assert [c["label"] for c in vm["children"]] == ["Connecting…", "Focus window", "Disconnect"]
+    assert [c["label"] for c in vm["children"]] == ["Connecting…", "Focus window", "Reconnect", "Disconnect"]
 
 
 def test_footer_and_empty_feed():
@@ -71,7 +71,8 @@ def test_removed_account_only_offers_running_session_actions():
                  'resources': [_res('running', 'Running'), _res('idle', 'Idle')]}]
     menu = build_accounts_menu(accounts, {('a', 'running'): {'running': True, 'state': 'connected'}})
     assert [r['label'] for r in menu[0]['children']] == ['CONTOSO', '● Running']
-    assert menu[0]['children'][1]['children'][1]['action'] == ('disconnect', 'a', 'running')
+    assert [c['action'] for c in menu[0]['children'][1]['children']] == [
+        ('focus', 'a', 'running'), ('disconnect', 'a', 'running')]
 
 
 def test_menu_can_omit_footer_without_truncating_resources():

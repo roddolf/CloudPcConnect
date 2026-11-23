@@ -30,6 +30,7 @@ def _resource_item(res, session):
     if running:
         children = [item(_("Connecting…"), enabled=False)] if state == "connecting" else []
         children += [item(_("Focus window"), ("focus", rid)),
+                     item(_("Reconnect"), ("reconnect", rid)),
                      item(_("Disconnect"), ("disconnect", rid))]
     elif state == "connecting":
         children = [item(_("Connecting…"), enabled=False)]
@@ -73,6 +74,9 @@ def build_accounts_menu(accounts, sessions):
         states = {r['id']: sessions.get((aid, r['id']), {}) for r in resources}
         children = build_menu(resources, states, include_footer=False)
         for group in children:
+            if account.get('removed'):     # signed out: nothing to reconnect with
+                group['children'] = [a for a in group.get('children', [])
+                                     if not a.get('action') or a['action'][0] != 'reconnect']
             for action in group.get('children', []):
                 if action.get('action'):
                     kind, rid = action['action']

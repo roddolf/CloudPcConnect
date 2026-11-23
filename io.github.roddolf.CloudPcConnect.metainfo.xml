@@ -35,8 +35,20 @@
 
   <screenshots>
     <screenshot type="default">
-      <caption>Cloud PCs and remote apps</caption>
-      <image>https://raw.githubusercontent.com/roddolf/CloudPcConnect/main/screenshots/omarchy-dark.png</image>
+      <caption>Cloud PCs, virtual desktops and apps</caption>
+      <image>https://raw.githubusercontent.com/roddolf/CloudPcConnect/main/screenshots/main-dark.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Actions for a connected Cloud PC</caption>
+      <image>https://raw.githubusercontent.com/roddolf/CloudPcConnect/main/screenshots/actions-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Search and filters</caption>
+      <image>https://raw.githubusercontent.com/roddolf/CloudPcConnect/main/screenshots/filter-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Cloud PC settings with workspace and launcher entry</caption>
+      <image>https://raw.githubusercontent.com/roddolf/CloudPcConnect/main/screenshots/settings-dark.png</image>
     </screenshot>
   </screenshots>
 

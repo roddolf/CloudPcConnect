@@ -12,7 +12,7 @@ def test_connect_uri_round_trip_and_rejects_other_input():
 
 def test_desktop_entry_is_single_line_per_key():
     entry = launchers.desktop_entry('app.id', 'juno\nExec=evil', 'acct', 'res')
-    assert 'Exec=avd-feed-connect cloudpcconnect://connect/acct/res' in entry.splitlines()
+    assert 'Exec=cloud-pc-connect cloudpcconnect://connect/acct/res' in entry.splitlines()
     assert not any(line.startswith('Exec=evil') for line in entry.splitlines())
     assert launchers.desktop_file_id('app.id', 'acct', 'res').startswith('app.id.pc_')
 

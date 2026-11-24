@@ -198,8 +198,8 @@ class RdpLauncher:
 
     def launch(self, path, upn=""):
         env = dict(os.environ)
-        # Only inject SDL_LIBS when it actually exists (unpackaged builds); inside
-        # the Flatpak the loader finds the bundled libs via rpath.
+        # Only inject SDL_LIBS when it actually exists (unpackaged builds); the
+        # package's client finds its bundled libs via RUNPATH.
         if self.sdl_libs and os.path.isdir(self.sdl_libs):
             env["LD_LIBRARY_PATH"] = self.sdl_libs + (
                 os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")

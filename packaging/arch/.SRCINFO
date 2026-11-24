@@ -1,0 +1,77 @@
+pkgbase = cloud-pc-connect
+	pkgdesc = Windows 365 Cloud PC, Dev Box and Azure Virtual Desktop client for Omarchy
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/roddolf/CloudPcConnect
+	arch = x86_64
+	license = MIT
+	license = Zlib
+	license = Apache-2.0
+	license = BSD-3-Clause
+	makedepends = cargo
+	makedepends = cbindgen
+	makedepends = clang>=21
+	makedepends = cmake
+	makedepends = git
+	makedepends = libdecor
+	makedepends = ninja
+	makedepends = patchelf
+	makedepends = pipewire
+	depends = alsa-lib
+	depends = bash
+	depends = cjson
+	depends = ffmpeg
+	depends = freetype2
+	depends = gdk-pixbuf2
+	depends = glib2
+	depends = glibc
+	depends = gtk4
+	depends = hicolor-icon-theme
+	depends = icu
+	depends = libcbor
+	depends = libcups
+	depends = libfido2
+	depends = libgcc
+	depends = libgl
+	depends = libjpeg-turbo
+	depends = libpng
+	depends = libpulse
+	depends = libsecret
+	depends = libstdc++
+	depends = libusb
+	depends = libwebp
+	depends = libx11
+	depends = libxcursor
+	depends = libxext
+	depends = libxfixes
+	depends = libxi
+	depends = libxinerama
+	depends = libxkbcommon
+	depends = libxkbfile
+	depends = libxrandr
+	depends = libxrender
+	depends = openssl
+	depends = pango
+	depends = python
+	depends = python-cairo
+	depends = python-gobject
+	depends = wayland
+	depends = webkitgtk-6.0
+	depends = zlib
+	optdepends = pcsclite: smart card (PIV/CAC) redirection
+	optdepends = libdecor: window decorations for the SDL client on Wayland
+	optdepends = xdg-desktop-portal-gtk: per-Cloud PC app launcher entries
+	options = !lto
+	options = !debug
+	source = cloud-pc-connect::git+https://github.com/roddolf/CloudPcConnect.git#tag=v0.1.0
+	source = SDL::git+https://github.com/libsdl-org/SDL.git#tag=release-3.2.30
+	source = SDL_ttf::git+https://github.com/libsdl-org/SDL_ttf.git#tag=release-3.2.2
+	source = FreeRDP::git+https://github.com/FreeRDP/FreeRDP.git#tag=3.32.2
+	source = freerdp-teams-redir::git+https://github.com/vchegwidden/freerdp-teams-redir.git#commit=54051fdc5e8640dfdcb0a63c974936bc1025c6f9
+	sha256sums = SKIP
+	sha256sums = 89126772aea8bf4e04c75f476d5e4c5e068bdcac7a9079d1ac0857855db0bc26
+	sha256sums = 72e8492c9ff9314437288707ec84bfcca8fa89172cd14cc16e099353c80c7018
+	sha256sums = 8550c077d4052f583cfa283cb86d0d879292cb95850d463a5bf2dd4e2117bc2a
+	sha256sums = 076a08f3bf1bc74bb41a8574be701f607a6a92d6a5adbbeade85ab6bf720aad1
+
+pkgname = cloud-pc-connect

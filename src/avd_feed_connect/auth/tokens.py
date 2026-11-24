@@ -13,8 +13,7 @@ import time
 
 from .. import config
 
-# libsecret schema id. Inside Flatpak the keyring is per app, so tokens from
-# upstream AVD Feed + Connect are not reachable and need one fresh sign-in.
+# libsecret schema id, separate from upstream AVD Feed + Connect's.
 _SCHEMA_ID = "io.github.roddolf.CloudPcConnect"
 
 

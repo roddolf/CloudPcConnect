@@ -722,7 +722,7 @@ index 7ce1a54..ae65ab8 100644
 +		return FALSE;
 +	}
 +	std::string python = "python3";
-+	std::vector<std::string> args = { python, "/app/share/avd-feed-connect/fido-picker.py" };
++	std::vector<std::string> args = { python, "/opt/cloud-pc-connect/share/avd-feed-connect/fido-picker.py" };
 +	if (pin)
 +	{
 +		args.emplace_back("--pin");

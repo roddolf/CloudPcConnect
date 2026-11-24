@@ -141,24 +141,22 @@ def azure_arg(scheme=False):
 
 HOME = os.path.expanduser("~")
 
-# Data dir: use XDG_DATA_HOME (set to the app's private dir inside Flatpak) so
-# the token cache and generated .rdp files land in a sane, writable place both
-# packaged and unpackaged.
+# Data dir: the token cache and generated .rdp files go under XDG_DATA_HOME.
 _DATA = os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
 OUT = os.path.join(_DATA, "avd-feed-connect", "feed")
 CACHE = os.path.join(_DATA, "avd-feed-connect", "token-cache.json")
 
 
 def find_sdl_freerdp():
-    """Locate the SDL3 FreeRDP client. In the Flatpak it is on PATH at
-    /app/bin/sdl-freerdp; unpackaged, fall back to the local -cam build."""
+    """Locate the SDL3 FreeRDP client. The package's wrapper sets
+    AVD_SDL_FREERDP; unpackaged, fall back to the local -cam build."""
     return (os.environ.get("AVD_SDL_FREERDP")
             or shutil.which("sdl-freerdp")
             or os.path.join(HOME, "opt", "freerdp-sdl3-cam", "bin", "sdl-freerdp"))
 
 
 SDL = find_sdl_freerdp()
-# Only needed unpackaged (Flatpak resolves libs via rpath); empty = don't touch.
+# Only needed unpackaged (the package resolves libs via RUNPATH); empty = don't touch.
 SDL_LIBS = os.environ.get("AVD_SDL_LIBS", os.path.join(HOME, "opt", "sdl3", "lib"))
 
 AAD_LOGIN_HOST = _C["authority"]

@@ -2,7 +2,7 @@
 Type=Application
 Name=Cloud PC Connect
 Comment=Connect to Windows 365 Cloud PCs, Dev Boxes and Azure Virtual Desktop
-Exec=avd-feed-connect %u
+Exec=cloud-pc-connect %u
 Icon=io.github.roddolf.CloudPcConnect
 Terminal=false
 Categories=Network;RemoteAccess;GTK;
@@ -10,6 +10,6 @@ Keywords=cloud;pc;devbox;windows365;avd;rdp;remote;azure;virtual;desktop;windows
 StartupNotify=true
 # Registers the app as the handler for the ms-appx-web sign-in redirect so the
 # browser can hand the final ?code=… URL straight back (see do_open); the %u on
-# Exec passes that URI in. Flatpak exports this and routes the URI to the
-# running instance over D-Bus.
+# Exec passes that URI in, and GApplication routes it to the running instance
+# over D-Bus.
 MimeType=x-scheme-handler/ms-appx-web;

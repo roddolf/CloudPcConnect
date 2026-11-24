@@ -7,8 +7,7 @@ exported here with plain Gio:
   /MenuBar             its right-click menu (com.canonical.dbusmenu)
 and registered with the session's org.kde.StatusNotifierWatcher (KDE, Waybar,
 the GNOME AppIndicator extension, ...). The item registers under the
-connection's unique name, so no extra bus name is owned (the Flatpak only needs
---talk-name=org.kde.StatusNotifierWatcher).
+connection's unique name, so no extra bus name is owned.
 
 ``available`` is True only while a watcher has accepted the item and reports a
 tray host, so the app can fall back to a normal window where nothing would show

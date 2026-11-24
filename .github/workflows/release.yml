@@ -1,124 +1,60 @@
-name: Build & Release Flatpak
+name: Release
 
-# On a version tag: build + sign the app, publish the single-file bundle to a
-# GitHub Release, and refresh the signed Flatpak repo + .flatpakref on GitHub
-# Pages (so `flatpak install <pages>/…​.flatpakref` and `flatpak update` work).
-#   push tag  vX.Y.Z   -> full release (bundle + Pages)
-#   manual dispatch    -> build only (bundle uploaded as a run artifact)
+# Push a tag vX.Y.Z (matching pkgver in packaging/arch/PKGBUILD) to build the
+# Arch package and attach it to a GitHub release. A manual run builds the
+# package from the selected commit and keeps it as a run artifact.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write   # release + gh-pages push
+  contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
-      options: --privileged
+  arch:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Import signing key
-        env:
-          KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+      - name: Prepare the build user
         run: |
-          set -eu
-          mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
-          echo "$KEY" | base64 -d | gpg --batch --import
-          gpg --export "${{ secrets.FLATPAK_GPG_KEYID }}" | base64 -w0 > pubkey.b64
+          pacman -Syu --noconfirm --needed git
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
 
-      - name: Pin app module to this commit
-        run: |
-          set -eu
-          m=io.github.roddolf.CloudPcConnect.yml
-          awk -v sha="$GITHUB_SHA" '
-            /avd_feed_connect\.git/ { print; getline; sub(/commit:.*/, "commit: " sha); print; next }
-            { print }
-          ' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
+      - uses: actions/checkout@v5
 
-      # The action installs the runtime/SDK, builds into ./repo, signs it, and
-      # produces the single-file bundle.
-      - name: Build (signed)
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          manifest-path: io.github.roddolf.CloudPcConnect.yml
-          cache-key: flatpak-builder-${{ github.sha }}
-          gpg-sign: ${{ secrets.FLATPAK_GPG_KEYID }}
-
-      - name: Re-sign repo summary
-        run: flatpak build-update-repo repo --gpg-sign="${{ secrets.FLATPAK_GPG_KEYID }}"
-
-      # Build the bundle ourselves so it embeds the Pages repo URL + signing key
-      # → installs from the bundle are ALSO updatable via `flatpak update`.
-      - name: Make updatable, signed bundle
-        run: |
-          set -eu
-          gpg --export "${{ secrets.FLATPAK_GPG_KEYID }}" > pubkey.gpg
-          flatpak build-bundle \
-            --repo-url=https://roddolf.github.io/CloudPcConnect/repo \
-            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-            --gpg-keys=pubkey.gpg \
-            repo avd_feed_connect.flatpak io.github.roddolf.CloudPcConnect master
-
-      - name: Assemble GitHub Pages site (repo + flatpakref)
-        run: |
-          set -eu
-          mkdir -p site/repo
-          cp -r repo/* site/repo/
-          touch site/.nojekyll
-          cat > site/avd_feed_connect.flatpakref <<EOF
-          [Flatpak Ref]
-          Name=io.github.roddolf.CloudPcConnect
-          Branch=master
-          Url=https://roddolf.github.io/CloudPcConnect/repo
-          Title=AVD Feed + Connect (Linux)
-          IsRuntime=false
-          GPGKey=$(cat pubkey.b64)
-          RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
-          SuggestRemoteName=avd-feed-connect
-          EOF
-          cat > site/index.html <<'EOF'
-          <!doctype html><meta charset="utf-8"><title>AVD Feed + Connect</title>
-          <h1>AVD Feed + Connect (Linux)</h1>
-          <p>Install (double-click):
-          <a href="avd_feed_connect.flatpakref">avd_feed_connect.flatpakref</a></p>
-          <p><a href="https://github.com/roddolf/CloudPcConnect">Source &amp; releases</a></p>
-          EOF
-
-      - name: Deploy to GitHub Pages
+      - name: Check the tag matches pkgver
         if: startsWith(github.ref, 'refs/tags/')
-        uses: peaceiris/actions-gh-pages@v4
+        run: |
+          pkgver=$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)
+          test "v$pkgver" = "$GITHUB_REF_NAME" || {
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match pkgver $pkgver"; exit 1; }
+
+      - name: Build the package
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          build=/home/builder/build
+          install -d -o builder "$build"
+          # Build the checked-out commit rather than fetching the tag from GitHub.
+          sed "s|git+https://github.com/roddolf/CloudPcConnect.git#tag=v\${pkgver}|git+file://$GITHUB_WORKSPACE#commit=$GITHUB_SHA|" \
+            packaging/arch/PKGBUILD > "$build/PKGBUILD"
+          chown -R builder "$build"
+          cd "$build"
+          sudo -u builder git config --global --add safe.directory '*'
+          sudo -u builder makepkg --syncdeps --noconfirm --noprogressbar
+          cp "$build"/*.pkg.tar.zst "$GITHUB_WORKSPACE/"
+
+      - name: Upload artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          publish_branch: gh-pages
-          force_orphan: true
+          name: cloud-pc-connect
+          path: '*.pkg.tar.zst'
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: avd_feed_connect.flatpak
+          files: '*.pkg.tar.zst'
           generate_release_notes: true
-          body: |
-            ## Install
-
-            **One click:** open
-            [avd_feed_connect.flatpakref](https://roddolf.github.io/CloudPcConnect/avd_feed_connect.flatpakref)
-            — or `flatpak install --user https://roddolf.github.io/CloudPcConnect/avd_feed_connect.flatpakref`
-
-            **Or** download `avd_feed_connect.flatpak` below and
-            `flatpak install --user avd_feed_connect.flatpak`.
-
-            Bundles a hardened FreeRDP (pulse hot-unplug fixes + camera redirection).
-
-      - name: Upload bundle artifact (manual runs)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: avd_feed_connect-flatpak
-          path: avd_feed_connect.flatpak

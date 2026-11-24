@@ -3,13 +3,13 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "avd-feed-connect"
-version = "0.4.0"
-description = "Native Linux client for Azure Virtual Desktop and Windows 365 (feed discovery + connect)"
+name = "cloud-pc-connect"
+version = "0.1.0"
+description = "Windows 365, Dev Box and Azure Virtual Desktop client for Omarchy"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Shakeel Osmani" }]
+authors = [{ name = "Rodolfo Aguirre" }, { name = "Shakeel Osmani" }]
 keywords = ["AVD", "RDP", "Azure Virtual Desktop", "Windows 365", "FreeRDP"]
 
 # Runtime GUI deps (PyGObject: Gtk 4, WebKit 6, Secret 1) come from the system /

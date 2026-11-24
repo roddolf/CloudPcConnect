@@ -26,8 +26,7 @@ Focus window / Disconnect. Opt-in (Settings menu), while a tray host is present:
 closing the window hides it to the tray, and the app can start hidden there.
 AVD_TRAY=0 turns the tray off.
 
-Runtime: PyGObject with Gtk 4.0, WebKit 6.0 (all in the GNOME 51 Flatpak
-runtime).
+Runtime: PyGObject with Gtk 4.0 and WebKit 6.0.
 """
 
 import json
@@ -57,7 +56,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Software-composite WebKit (our sign-in webview) instead of the DMABUF/GBM
 # GPU path. That path fails to allocate a GBM buffer on some GPUs/drivers
-# (notably under XWayland / in the Flatpak sandbox, and after repeated webviews
+# (notably under XWayland, and after repeated webviews
 # exhaust buffers), leaving the sign-in window BLANK. Must be set before WebKit
 # initializes its renderer. setdefault so a user can still force the GPU path.
 os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
@@ -109,7 +108,7 @@ from avd_feed_connect.gui.session import AccountSession  # noqa: E402
 
 APP_NAME = "Cloud PC Connect"
 HYPR_WORKSPACES = list(range(1, 11))
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.1.0"
 # LOCAL_PROFILE_ID (the synthetic account for user-opened .rdp files, issue #17)
 # is imported from avd_feed_connect.accounts, its single source of truth.
 
@@ -220,8 +219,7 @@ class AvdApp(Gtk.Application):
     def __init__(self):
         # Demo/screenshot runs skip D-Bus single-instance registration entirely
         # (NON_UNIQUE), so they always run standalone and never hand off to (or
-        # collide with) the installed app. Under Flatpak the sandbox only lets
-        # the app own its exact app id, so a custom demo id can't be registered.
+        # collide with) the installed app.
         if os.environ.get("AVD_DEMO"):
             super().__init__(application_id=APP_ID,
                              flags=Gio.ApplicationFlags.NON_UNIQUE)
@@ -3120,7 +3118,7 @@ class AvdApp(Gtk.Application):
                     if not session.removed and (attempt is None or attempt.active()):
                         notice = Gio.Notification.new(tr("Security key"))
                         notice.set_body(tr("Touch your security key to continue."))
-                        # A host-theme name: the shell cannot see the Flatpak-exported app icon.
+                        # A theme icon the notification daemon always has.
                         notice.set_icon(Gio.ThemedIcon.new("dialog-password-symbolic"))
                         self.send_notification(notification_id, notice)
                     return GLib.SOURCE_REMOVE
@@ -3547,20 +3545,17 @@ class AvdApp(Gtk.Application):
         self._tray_refresh()
 
     def _tray_icon_dir(self):
-        """A host-visible directory holding the tray icon file itself. Hosts
-        look IconName up in their own icon theme, which doesn't always include
-        Flatpak's exported icons (Omarchy's bar doesn't), so point them at it.
-        The Flatpak's tray/ dir has the icon both as <name>.svg and as <name>,
-        since Quickshell loads <dir>/<IconName> without adding an extension."""
-        try:
-            info = GLib.KeyFile()
-            info.load_from_file("/.flatpak-info", GLib.KeyFileFlags.NONE)
-            return os.path.join(info.get_string("Instance", "app-path"),
-                                "share/avd-feed-connect/tray")
-        except GLib.Error:
-            pass
+        """A directory holding the tray icon file itself, so the tray host
+        doesn't depend on its icon theme. The installed tray/ dir has the icon
+        both as <name>.svg and as <name>, since Quickshell loads
+        <dir>/<IconName> without adding an extension."""
+        # Installed: tray/ sits next to this script.
+        here = os.path.dirname(os.path.abspath(__file__))
+        tray = os.path.join(here, "tray")
+        if os.path.exists(os.path.join(tray, APP_ID + "-symbolic")):
+            return tray
         # Unpackaged run: the icon sits at the top of the source tree.
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = os.path.dirname(here)
         return root if os.path.exists(os.path.join(root, APP_ID + "-symbolic.svg")) else ""
 
     def _tray_refresh(self):

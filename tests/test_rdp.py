@@ -131,8 +131,8 @@ def test_malformed_display_args_are_reported(tmp_path):
 
 
 def test_argv_core_flags(tmp_path):
-    argv = build_argv("/app/bin/sdl-freerdp", _rdp(tmp_path, "enablerdsaadauth:i:1\n"), "")
-    assert argv[0] == "/app/bin/sdl-freerdp"
+    argv = build_argv("/opt/cloud-pc-connect/bin/sdl-freerdp", _rdp(tmp_path, "enablerdsaadauth:i:1\n"), "")
+    assert argv[0] == "/opt/cloud-pc-connect/bin/sdl-freerdp"
     assert argv[1] == _rdp(tmp_path, "enablerdsaadauth:i:1\n")
     assert "/gateway:type:arm" in argv
     assert "/sec:aad" in argv

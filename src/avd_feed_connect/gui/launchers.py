@@ -43,8 +43,8 @@ def _desktop_value(text):
     return " ".join(str(text).split()).replace("\\", "\\\\")
 
 
-def desktop_entry(app_id, name, account_id, resource_id, command="avd-feed-connect"):
-    """The entry text handed to the portal; the portal adds Icon and rewrites Exec."""
+def desktop_entry(app_id, name, account_id, resource_id, command="cloud-pc-connect"):
+    """The entry text handed to the portal, which adds Icon."""
     return "\n".join((
         "[Desktop Entry]",
         "Type=Application",
@@ -223,10 +223,28 @@ class PortalLauncher:
 
     def __init__(self, app_id):
         self.app_id = app_id
+        self._connection = None
 
     def _bus(self):
-        from gi.repository import Gio
-        return Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        """A private session-bus connection registered as this app. The portal
+        takes the app ID of a host app from Registry.Register, which must come
+        before any other portal call on the connection; GTK has already used
+        the shared one for its settings portal."""
+        if self._connection is None:
+            from gi.repository import Gio, GLib
+            address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+            connection = Gio.DBusConnection.new_for_address_sync(
+                address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+            try:
+                connection.call_sync(
+                    self.BUS, self.PATH, "org.freedesktop.host.portal.Registry", "Register",
+                    GLib.Variant("(sa{sv})", (self.app_id, {})), None,
+                    Gio.DBusCallFlags.NONE, 2000, None)
+            except GLib.Error:
+                pass
+            self._connection = connection
+        return self._connection
 
     def available(self):
         from gi.repository import Gio, GLib

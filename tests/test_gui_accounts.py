@@ -170,6 +170,24 @@ def test_teams_optimization_defaults_to_video_with_overrides(app, monkeypatch):
     assert app._eff_teams(res, a) == 'off'
 
 
+def test_tray_icon_dir_prefers_installed_tray_dir(app, tmp_path, monkeypatch):
+    share = tmp_path / 'share' / 'avd-feed-connect'
+    (share / 'tray').mkdir(parents=True)
+    monkeypatch.setattr(gui, '__file__', str(share / 'avd_feed_gui.py'))
+    assert app._tray_icon_dir() == ''
+    (share / 'tray' / (gui.APP_ID + '-symbolic')).write_text('<svg/>')
+    assert app._tray_icon_dir() == str(share / 'tray')
+
+
+def test_teams_plugin_is_found_under_the_client_prefix(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui.config, 'SDL', str(tmp_path / 'bin' / 'sdl-freerdp'))
+    assert not app._teams_plugin_available()
+    plugin = tmp_path / 'lib' / 'freerdp3' / 'libteams-redir-client.so'
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b'')
+    assert app._teams_plugin_available()
+
+
 def test_tray_connects_unselected_saved_account_without_switching(app, monkeypatch):
     a, b = add_saved(app, 'a', 'a@example.com'), add_saved(app, 'b', 'b@example.com')
     app._select_account(a.id)

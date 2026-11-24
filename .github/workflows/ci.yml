@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -19,12 +21,10 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python -m pip install --upgrade pip pytest pyyaml
+        run: python -m pip install --upgrade pip pytest
 
       - name: Run unit tests
         run: PYTHONPATH=src python -m pytest tests/ -q
 
-      - name: Validate Flatpak manifest and metainfo
-        run: |
-          python -c "import yaml; yaml.safe_load(open('io.github.roddolf.CloudPcConnect.yml')); print('manifest YAML OK')"
-          python -c "import xml.etree.ElementTree as ET; ET.parse('io.github.roddolf.CloudPcConnect.metainfo.xml'); print('metainfo XML OK')"
+      - name: Validate metainfo
+        run: python -c "import xml.etree.ElementTree as ET; ET.parse('io.github.roddolf.CloudPcConnect.metainfo.xml'); print('metainfo XML OK')"

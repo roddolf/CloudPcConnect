@@ -57,35 +57,35 @@ its own light and dark themes.
 
 ## Install
 
-There are no prebuilt packages yet. Build and install the Flatpak from a
-checkout:
+Cloud PC Connect is an Arch Linux package. It brings its own patched FreeRDP
+and SDL in `/opt/cloud-pc-connect`, so it doesn't touch the system FreeRDP.
+
+Install the package from the
+[latest release](https://github.com/roddolf/CloudPcConnect/releases/latest):
 
 ```bash
-flatpak install --user flathub org.gnome.Platform//51 org.gnome.Sdk//51 org.flatpak.Builder
-git clone https://github.com/roddolf/CloudPcConnect.git
-cd CloudPcConnect
-flatpak run org.flatpak.Builder --user --install --force-clean build-dir \
-  io.github.roddolf.CloudPcConnect.yml
-flatpak run io.github.roddolf.CloudPcConnect
+sudo pacman -U https://github.com/roddolf/CloudPcConnect/releases/download/v0.1.0/cloud-pc-connect-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
-The first build compiles FreeRDP, SDL, libfido2 and the Teams add-in, which
-takes several minutes. Later builds reuse the cache. The manifest builds the
-app from the working tree, so the same command picks up local changes.
+To update, install the package from a newer release the same way.
 
-The app ID is `io.github.roddolf.CloudPcConnect`. It installs next to
-upstream AVD Feed + Connect and keeps its own data and keyring entries. To
-bring over accounts and resource settings from upstream, copy the data
-directory before the first launch:
+To build the package yourself, run `makepkg -si` in `packaging/arch` of a
+checkout. The build compiles FreeRDP, SDL and the Teams add-in and downloads
+a prebuilt libwebrtc, so it takes several minutes.
+
+### Coming from AVD Feed + Connect
+
+Cloud PC Connect installs next to upstream AVD Feed + Connect and keeps its
+own data and keyring entries. To bring over accounts and resource settings
+from the upstream Flatpak, copy its data directory before the first launch:
 
 ```bash
-mkdir -p ~/.var/app/io.github.roddolf.CloudPcConnect/data
 cp -r ~/.var/app/io.github.shakeelosmani.avd_feed_connect/data/avd-feed-connect \
-  ~/.var/app/io.github.roddolf.CloudPcConnect/data/
+  ~/.local/share/
 ```
 
-You sign in once more in the new app, because sign-in tokens stay in the
-keyring of each app.
+You sign in once more, because sign-in tokens stay in the keyring of each
+app.
 
 ## Getting started
 
@@ -242,12 +242,11 @@ value that contains a space, as in a shell.
 
 ### Environment variables
 
-Environment variables override the in-app settings. Set them with
-[Flatseal](https://flathub.org/apps/com.github.tchx84.Flatseal) or
-`flatpak override`:
+Environment variables override the in-app settings. Set them in
+`~/.config/uwsm/env` and log in again, or start the app with them:
 
 ```bash
-flatpak override --user --env=AVD_SCALE=150 io.github.roddolf.CloudPcConnect
+AVD_SCALE=150 cloud-pc-connect
 ```
 
 | Variable | Effect |
@@ -269,7 +268,7 @@ flatpak override --user --env=AVD_SCALE=150 io.github.roddolf.CloudPcConnect
 Settings are plain JSON files:
 
 ```text
-~/.var/app/io.github.roddolf.CloudPcConnect/data/avd-feed-connect/
+~/.local/share/avd-feed-connect/
 ├── settings.json                  app-wide settings and defaults
 ├── accounts.json                  saved accounts and display names
 └── accounts/<account-id>/
@@ -382,24 +381,24 @@ host pool also grants you a desktop.
 
 ## Development
 
-The app runs without Flatpak when PyGObject with GTK 4 and WebKit 6 is
-installed and an SDL3 `sdl-freerdp` is on `PATH`:
+Run a checkout with the installed package's FreeRDP:
 
 ```bash
+export AVD_SDL_FREERDP=/opt/cloud-pc-connect/bin/sdl-freerdp AVD_SDL_LIBS=
 python3 src/avd_feed_gui.py           # GUI
 python3 src/avdfeed.py list           # CLI: list resources
 python3 src/avdfeed.py connect 0      # CLI: connect to resource 0
 python -m pytest tests
 ```
 
-Build `sdl-freerdp` against SDL 3.2. Newer SDL releases report a 0×0 display
-and full screen fails. The app adds `~/opt/sdl3/lib`, or `AVD_SDL_LIBS`, to
-the client's library path.
+Without the package, build `sdl-freerdp` against SDL 3.2. Newer SDL releases
+report a 0×0 display and full screen fails. The app adds `~/opt/sdl3/lib`, or
+`AVD_SDL_LIBS`, to the client's library path.
 
 `AVD_DEMO=1` shows the Contoso example data used for the screenshots.
 
-FreeRDP patches live in `patches/` and the manifest lists why each one is
-there.
+FreeRDP and SDL patches live in `patches/`, and `packaging/arch/PKGBUILD`
+lists why each one is there.
 
 ### Translations
 

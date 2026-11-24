@@ -1,0 +1,229 @@
+# Maintainer: Rodolfo Aguirre <roddolf at users dot noreply dot github dot com>
+#
+# Builds pinned SDL3, SDL3_ttf, a patched FreeRDP and the Teams add-in into
+# /opt/cloud-pc-connect, so they never clash with the system SDL3/FreeRDP.
+# Everything else comes from Arch packages.
+#
+# Patches (patches/ in the app source):
+#   sdl3-0001     Failed remote clipboard reads complete across XWayland.
+#                 Backport of SDL#16568; drop with an SDL release that has it.
+#   freerdp-0001  Don't pass the terminating null of clipboard text to local
+#                 apps (stray character on paste). FreeRDP#13705.
+#   freerdp-0002  Multi-monitor: anchor the layout at the top-left monitor, or
+#                 AVD hosts stall at logon when the primary isn't top-left.
+#   freerdp-0003  Multi-monitor: place each SDL window on its real monitor.
+#   freerdp-0004  WebAuthn redirection with the security-key account picker.
+#
+# Network during build(): the Teams add-in's webrtc-sys build script downloads
+# LiveKit's prebuilt libwebrtc (~150 MB). Cargo crates are fetched in prepare().
+
+pkgname=cloud-pc-connect
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Windows 365 Cloud PC, Dev Box and Azure Virtual Desktop client for Omarchy'
+arch=('x86_64')
+url='https://github.com/roddolf/CloudPcConnect'
+# MIT: the app and freerdp-teams-redir. Bundled: SDL3/SDL3_ttf (Zlib),
+# FreeRDP (Apache-2.0), libwebrtc statically linked into the add-in (BSD-3-Clause).
+license=('MIT' 'Zlib' 'Apache-2.0' 'BSD-3-Clause')
+depends=(
+  'alsa-lib'
+  'bash'
+  'cjson'
+  'ffmpeg'
+  'freetype2'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk4'
+  'hicolor-icon-theme'
+  'icu'
+  'libcbor'
+  'libcups'
+  'libfido2'
+  'libgcc'
+  'libgl'
+  'libjpeg-turbo'
+  'libpng'
+  'libpulse'
+  'libsecret'
+  'libstdc++'
+  'libusb'
+  'libwebp'
+  'libx11'
+  'libxcursor'
+  'libxext'
+  'libxfixes'
+  'libxi'
+  'libxinerama'
+  'libxkbcommon'
+  'libxkbfile'
+  'libxrandr'
+  'libxrender'
+  'openssl'
+  'pango'
+  'python'
+  'python-cairo'
+  'python-gobject'
+  'wayland'
+  'webkitgtk-6.0'
+  'zlib'
+)
+makedepends=(
+  'cargo'
+  'cbindgen'
+  'clang>=21'
+  'cmake'
+  'git'
+  'libdecor'
+  'ninja'
+  'patchelf'
+  'pipewire'
+)
+optdepends=(
+  'pcsclite: smart card (PIV/CAC) redirection'
+  'libdecor: window decorations for the SDL client on Wayland'
+  'xdg-desktop-portal-gtk: per-Cloud PC app launcher entries'
+)
+options=('!lto' '!debug')
+_prefix=/opt/cloud-pc-connect
+_appid=io.github.roddolf.CloudPcConnect
+source=(
+  "$pkgname::git+https://github.com/roddolf/CloudPcConnect.git#tag=v${pkgver}"
+  'SDL::git+https://github.com/libsdl-org/SDL.git#tag=release-3.2.30'
+  'SDL_ttf::git+https://github.com/libsdl-org/SDL_ttf.git#tag=release-3.2.2'
+  'FreeRDP::git+https://github.com/FreeRDP/FreeRDP.git#tag=3.32.2'
+  'freerdp-teams-redir::git+https://github.com/vchegwidden/freerdp-teams-redir.git#commit=54051fdc5e8640dfdcb0a63c974936bc1025c6f9'
+)
+# The app's checksum is SKIP until v${pkgver} is tagged; run updpkgsums then.
+sha256sums=('SKIP'
+            '89126772aea8bf4e04c75f476d5e4c5e068bdcac7a9079d1ac0857855db0bc26'
+            '72e8492c9ff9314437288707ec84bfcca8fa89172cd14cc16e099353c80c7018'
+            '8550c077d4052f583cfa283cb86d0d879292cb95850d463a5bf2dd4e2117bc2a'
+            '076a08f3bf1bc74bb41a8574be701f607a6a92d6a5adbbeade85ab6bf720aad1')
+
+prepare() {
+  cd SDL
+  git apply "$srcdir/$pkgname/patches/sdl3-0001-x11-preserve-target-in-failed-selection-notify.patch"
+
+  cd "$srcdir/FreeRDP"
+  local patch
+  for patch in "$srcdir/$pkgname"/patches/freerdp-000{1,2,3,4}-*.patch; do
+    git apply "$patch"
+  done
+
+  cd "$srcdir/freerdp-teams-redir"
+  export CARGO_HOME="$srcdir/cargo-home" RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  local stage="$srcdir/stage"
+  CFLAGS+=" -ffile-prefix-map=$srcdir=."
+  CXXFLAGS+=" -ffile-prefix-map=$srcdir=."
+  export RUSTFLAGS+=" --remap-path-prefix=$srcdir=."
+  local cmake_common=(
+    -G Ninja
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$_prefix"
+    -DCMAKE_INSTALL_LIBDIR=lib
+    -DCMAKE_PREFIX_PATH="$stage$_prefix"
+  )
+  # Later modules build against the earlier ones in the staging tree; their
+  # pkg-config files are relocated to where they actually sit.
+  export PKG_CONFIG_PATH="$stage$_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  export PKG_CONFIG_RELOCATE_PATHS=1
+  export LIBRARY_PATH="$stage$_prefix/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+  cmake -S SDL -B build-sdl "${cmake_common[@]}" \
+    -DSDL_STATIC=OFF
+  cmake --build build-sdl
+  DESTDIR="$stage" cmake --install build-sdl
+
+  cmake -S SDL_ttf -B build-sdl-ttf "${cmake_common[@]}" \
+    -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+    -DSDLTTF_VENDORED=OFF \
+    -DSDLTTF_HARFBUZZ=OFF \
+    -DSDLTTF_PLUTOSVG=OFF \
+    -DSDLTTF_SAMPLES=OFF
+  cmake --build build-sdl-ttf
+  DESTDIR="$stage" cmake --install build-sdl-ttf
+
+  # FreeRDP sets an $ORIGIN-relative RUNPATH.
+  cmake -S FreeRDP -B build-freerdp "${cmake_common[@]}" \
+    -DWITH_CLIENT_SDL=ON \
+    -DWITH_CLIENT_SDL3=ON \
+    -DWITH_CLIENT_SDL2=OFF \
+    -DWITH_SERVER=OFF \
+    -DWITH_SAMPLE=OFF \
+    -DWITH_AAD=ON \
+    -DWITH_WEBVIEW=OFF \
+    -DWITH_CJSON_REQUIRED=ON \
+    -DWITH_PULSE=ON \
+    -DWITH_SNDIO=OFF \
+    -DWITH_FFMPEG=ON \
+    -DWITH_SWSCALE=ON \
+    -DWITH_X11=ON \
+    -DWITH_KRB5=OFF \
+    -DWITH_PCSC=ON \
+    -DWITH_FUSE=OFF \
+    -DWITH_MANPAGES=OFF \
+    -DCHANNEL_RDPECAM_CLIENT=ON \
+    -DCHANNEL_RDPEWA=ON \
+    -DCHANNEL_RDPEWA_CLIENT=ON \
+    -DWINPR_UTILS_IMAGE_PNG=ON \
+    -DWINPR_UTILS_IMAGE_JPEG=ON \
+    -DWINPR_UTILS_IMAGE_WEBP=ON \
+    -DWINPR_UTILS_IMAGE_DIBv5=ON
+  cmake --build build-freerdp
+  DESTDIR="$stage" cmake --install build-freerdp
+
+  # The vendored libwebrtc's hermetic libc++ needs clang >= 21.
+  cd freerdp-teams-redir
+  export CARGO_HOME="$srcdir/cargo-home" RUSTUP_TOOLCHAIN=stable CC=clang CXX=clang++
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$_prefix" \
+    -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+    -DCMAKE_INSTALL_RPATH='$ORIGIN/..'
+  cmake --build build
+}
+
+package() {
+  cp -a "$srcdir/stage/." "$pkgdir/"
+  cd "$pkgdir$_prefix"
+  rm -rf include lib/pkgconfig lib/cmake lib/*.a share/man share/doc share/licenses
+
+  cd "$srcdir/freerdp-teams-redir"
+  install -Dm644 build/libteams-redir-client.so -t "$pkgdir$_prefix/lib/freerdp3"
+  install -Dm755 build/cargo/release/teams-redir-video -t "$pkgdir$_prefix/lib/freerdp3"
+  # Cargo links SDL3 by name only; resolve it to the bundled copy.
+  patchelf --set-rpath '$ORIGIN/..' "$pkgdir$_prefix/lib/freerdp3/teams-redir-video"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/freerdp-teams-redir.LICENSE"
+
+  install -Dm644 "$srcdir/SDL/LICENSE.txt" "$pkgdir/usr/share/licenses/$pkgname/SDL3.LICENSE"
+  install -Dm644 "$srcdir/SDL_ttf/LICENSE.txt" "$pkgdir/usr/share/licenses/$pkgname/SDL3_ttf.LICENSE"
+  install -Dm644 "$srcdir/FreeRDP/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/FreeRDP.LICENSE"
+
+  # The app.
+  cd "$srcdir/$pkgname"
+  local share="$pkgdir$_prefix/share/avd-feed-connect"
+  install -d "$share"
+  cp -r src/avd_feed_connect "$share/avd_feed_connect"
+  find "$share/avd_feed_connect" -name __pycache__ -type d -prune -exec rm -rf {} +
+  python -m compileall -q -d "$_prefix/share/avd-feed-connect/avd_feed_connect" \
+    "$share/avd_feed_connect"
+  install -Dm755 src/avdfeed.py "$share/avdfeed.py"
+  install -Dm755 src/avd_feed_gui.py "$share/avd_feed_gui.py"
+  install -Dm755 src/avd_feed_connect/gui/fido_picker.py "$share/fido-picker.py"
+  # Tray hosts get this dir as IconThemePath; Quickshell loads <dir>/<IconName>
+  # verbatim, other hosts add ".svg".
+  install -Dm644 $_appid-symbolic.svg "$share/tray/$_appid-symbolic.svg"
+  install -Dm644 $_appid-symbolic.svg "$share/tray/$_appid-symbolic"
+
+  install -Dm755 packaging/arch/cloud-pc-connect.sh "$pkgdir/usr/bin/cloud-pc-connect"
+  install -Dm644 $_appid.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 $_appid.metainfo.xml -t "$pkgdir/usr/share/metainfo"
+  install -Dm644 $_appid.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps"
+  install -Dm644 $_appid-symbolic.svg -t "$pkgdir/usr/share/icons/hicolor/symbolic/apps"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}

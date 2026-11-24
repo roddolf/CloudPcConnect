@@ -45,6 +45,9 @@ REMOTEAPP_VALUES = ["auto", "desktop"]
 # Teams call optimization through the bundled freerdp-teams-redir add-in.
 TEAMS_LABELS = ["Automatic (audio and video)", "Audio and video", "Audio only", "Off"]
 TEAMS_VALUES = ["auto", "video", "audio", "off"]
+# Local folder redirected into the remote session (FreeRDP +home-drive / /drive:).
+SHARE_LABELS = ["Automatic (off)", "Off", "Home folder", "Custom folder…"]
+SHARE_VALUES = ["auto", "off", "home", "custom"]
 
 
 # User-Agent presented by the embedded sign-in webview. "auto" presents as

@@ -89,7 +89,8 @@ from avd_feed_connect.rdp.security import resolve_security  # noqa: E402
 from avd_feed_connect.rdp.resources import local_resource, RdpDownloadError  # noqa: E402
 from avd_feed_connect.rdp.attempt import ConnectionAttempt  # noqa: E402
 from avd_feed_connect.rdp.launcher import (  # noqa: E402
-    build_display_args, disable_client_hotkeys, private_argument_file, session_log_path,
+    build_display_args, disable_client_hotkeys, drive_redirect_args,
+    private_argument_file, resolve_share_mode, session_log_path,
     webauthn_args)
 from avd_feed_connect.rdp.resources import (  # noqa: E402
     rdp_is_remoteapp, set_rdp_desktop_mode)
@@ -2533,7 +2534,7 @@ class AvdApp(Gtk.Application):
         child.add_controller(keys)
         bind(child, 'tooltip_text',
             tr("{resource} — {workspace}\nDouble-click to connect · right-click for actions").format(
-                resource=res["title"], workspace=res["tenant"]))
+                resource=res["title"], workspace=tray_menu.workspace_name(res)))
         rclick = Gtk.GestureClick()
         rclick.set_button(3)
         rclick.connect("pressed", lambda g, n, x, y: self._show_resource_menu(child, x, y))
@@ -2910,6 +2911,12 @@ class AvdApp(Gtk.Application):
             self._set_tile_state(res["id"], "state-ended", session, attempt=attempt)
             self._error(tr("Could not prepare display settings: {error}").format(error=error))
             return
+        # Local folder → remote session (appears under \\tsclient\…). Env
+        # AVD_SHARE wins; otherwise Default / per-resource Shared folder setting.
+        share_setting = self._eff("share", res, session)
+        share_path = self._eff_share_path(res, session)
+        share_mode, share_path = resolve_share_mode(share_setting, share_path)
+        argv += drive_redirect_args(path, share_mode, share_path, extra=extra)
         backend = workspace_backend()
         workspace_title = None
         hypr_workspace = None
@@ -3783,6 +3790,14 @@ class AvdApp(Gtk.Application):
             return "off"
         return self._eff("teams", res, session) or "video"
 
+    def _eff_share_path(self, res, session=None):
+        """Custom shared-folder path: per-resource → Default → \"\"."""
+        session = session or self.current
+        rv = (session.resource_settings if session else {}).get(res["id"], {}).get("share_path", "")
+        if rv:
+            return rv
+        return self._settings.get("_default", {}).get("share_path", "") or ""
+
     SETTINGS_CONTROL_WIDTH = 260
 
     def _form_row(self, label, widget, width=None):
@@ -4052,6 +4067,53 @@ class AvdApp(Gtk.Application):
             follow.append(hypr_note)
             placement.append(follow)
 
+        # Shared local folder redirected into the remote session (Desktop and
+        # RemoteApp). Off by default; Home uses FreeRDP +home-drive, Custom a
+        # /drive:share,<path>. Host-pool policy can still block redirection.
+        share_values = storage.SHARE_VALUES
+        share_labels = storage.SHARE_LABELS
+        share_dd = create(Gtk.DropDown, model=strings([tr(label) for label in share_labels]))
+        share_value = cur.get("share", "auto")
+        share_dd.set_selected(share_values.index(share_value)
+                              if share_value in share_values else 0)
+        share_path_entry = Gtk.Entry()
+        bind(share_path_entry, 'text', cur.get("share_path", ""))
+        bind(share_path_entry, 'placeholder_text', tr("path to a local folder"))
+        share_path_entry.set_hexpand(True)
+        share_path_entry.set_width_chars(1)
+        share_browse = create(Gtk.Button, label=tr("Choose…"))
+        share_path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        share_path_row.append(share_path_entry)
+        share_path_row.append(share_browse)
+        field(connection, tr("Shared folder"), share_dd, help_text(
+            tr("Shows up in the remote session as a network drive under This PC (\\\\tsclient). Your organization's host pool can still block folder redirection.")))
+        share_path_form = field(connection, tr("Folder path"), share_path_row)
+        custom_index = share_values.index("custom") if "custom" in share_values else -1
+
+        def update_share_path(*_):
+            share_path_form.get_parent().set_visible(share_dd.get_selected() == custom_index)
+        share_dd.connect("notify::selected", update_share_path)
+        update_share_path()
+
+        def choose_share_folder(*_):
+            dialog = Gtk.FileDialog(title=tr("Choose folder to share"))
+            parent = self.win if self.win and self.win.get_visible() else None
+
+            def on_selected(dlg, result):
+                try:
+                    folder = dlg.select_folder_finish(result)
+                except GLib.Error:
+                    return                       # cancelled or dismissed
+                finally:
+                    self._share_dialog = None    # release the kept reference
+                if folder:
+                    bind(share_path_entry, 'text', folder.get_path() or "")
+            # Keep a reference while the chooser is open, or the Gtk.FileDialog is
+            # garbage-collected before its async callback fires (issue #17).
+            self._share_dialog = dialog
+            dialog.select_folder(parent, None, on_selected)
+        share_browse.connect("clicked", choose_share_folder)
+
         # Sign-in browser identity (User-Agent). Lets a tenant that blocks Linux
         # at sign-in via Conditional Access be satisfied by posing as Edge/Chrome
         # on Windows (issue #28). Stored value is the literal UA string; "Custom…"
@@ -4134,6 +4196,8 @@ class AvdApp(Gtk.Application):
                 "cert": storage.CERT_VALUES[cert_dd.get_selected()],
                 "sec": storage.SEC_VALUES[sec_dd.get_selected()],
                 "extra_args": storage.drop_builtin_flags(extra_entry.get_text().strip()),
+                "share": share_values[share_dd.get_selected()],
+                "share_path": share_path_entry.get_text().strip(),
             }
             if ua_dd is not None:   # Default settings only; account-wide (issue #28)
                 ua_sel = ua_dd.get_selected()
@@ -4164,6 +4228,8 @@ class AvdApp(Gtk.Application):
                     and entry.get("teams", "auto") == "auto" \
                     and entry.get("hypr_workspace", "auto") == "auto" \
                     and not any(k in entry for k in ("launcher_icon", "launcher_id")) \
+                    and entry["share"] == "auto" \
+                    and not entry["share_path"] \
                     and not entry["extra_args"]:
                 settings.pop(key, None)
             else:

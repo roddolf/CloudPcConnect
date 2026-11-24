@@ -22,6 +22,11 @@ def test_cloud_pcs_come_first_and_apps_group_by_workspace():
         'Productivity Apps - West Europe', 'Productivity Apps - West US']
 
 
+def test_feed_workspace_name_wins_over_tenant():
+    app = dict(res('Edge', 'RemoteApp', 'Contoso'), workspace='AVD-RemoteApps')
+    assert rg.sections([app])[0][1][0][0] == 'AVD-RemoteApps'
+
+
 def test_region_prefers_the_most_specific_name():
     assert rg.region(FEED[0]) == 'West Europe'
     assert rg.region(FEED[1]) == 'Europe'

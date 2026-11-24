@@ -221,6 +221,7 @@ setting wins over the default, and the default wins over automatic detection.
 | Session authentication | Uses Entra sign-in when the feed supports it, otherwise username and password |
 | Open RemoteApp as | Opens the app window |
 | Open on workspace | Opens on the current workspace |
+| Shared folder | Off. Home or a chosen folder appears in Windows as a `\\tsclient` drive |
 | Advanced flags | None |
 
 FreeRDP's own shortcuts (Right Shift with Enter, D, R, G or M) are always off,
@@ -261,6 +262,7 @@ flatpak override --user --env=AVD_SCALE=150 io.github.roddolf.CloudPcConnect
 | `AVD_SCHEME_SIGNIN` | `1` uses the app handoff instead of a loopback redirect on the commercial cloud |
 | `AVD_TRAY` | `0` turns the tray icon off |
 | `AVD_SDL_FREERDP` | Path to another `sdl-freerdp` binary |
+| `AVD_SHARE` | `home`, `off` or a folder path for the shared folder |
 
 ## Backup and restore
 

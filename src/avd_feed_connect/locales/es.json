@@ -77,6 +77,15 @@
   "Sign-in browser": "Navegador de inicio de sesión",
   "Custom identity": "Identidad personalizada",
   "advanced: e.g. /gfx /network:auto": "avanzado: p. ej., /gfx /network:auto",
+  "Shared folder": "Carpeta compartida",
+  "Folder path": "Ruta de la carpeta",
+  "Choose…": "Elegir…",
+  "Choose folder to share": "Elegir carpeta para compartir",
+  "path to a local folder": "ruta a una carpeta local",
+  "Off": "Desactivado",
+  "Home folder": "Carpeta personal",
+  "Custom folder…": "Carpeta personalizada…",
+  "Shows up in the remote session as a network drive under This PC (\\\\tsclient). Your organization's host pool can still block folder redirection.": "Aparece en la sesión remota como una unidad de red en Este equipo (\\\\tsclient). El grupo de hosts de su organización aún puede bloquear la redirección de carpetas.",
   "Advanced flags": "Opciones avanzadas",
   "{automatic} Applies to your next connection.": "{automatic} Se aplica a la próxima conexión.",
   "Settings saved — applies to your next connection": "Configuración guardada; se aplica a la próxima conexión",
@@ -127,7 +136,6 @@
   "By account": "Por cuenta",
   "All accounts": "Todas las cuentas",
   "Signed in as {upn}": "Sesión iniciada como {upn}",
-  "Use Default settings": "Usar configuración predeterminada",
   "Enabled": "Activado",
   "Disabled": "Desactivado",
   "Language…": "Idioma…",
@@ -278,6 +286,6 @@
   "Automatic (audio and video)": "Automático (audio y vídeo)",
   "Audio and video": "Audio y vídeo",
   "Audio only": "Solo audio",
-  "Off": "Desactivado",
-  "Runs Teams call media on this computer. Restart Teams in the session once after the first connection. Video opens in its own window and screen sharing is not supported.": "Procesa el audio y el vídeo de las llamadas de Teams en este equipo. Reinicia Teams en la sesión una vez después de la primera conexión. El vídeo se abre en su propia ventana y no se puede compartir la pantalla."
+  "Runs Teams call media on this computer. Restart Teams in the session once after the first connection. Video opens in its own window and screen sharing is not supported.": "Procesa el audio y el vídeo de las llamadas de Teams en este equipo. Reinicia Teams en la sesión una vez después de la primera conexión. El vídeo se abre en su propia ventana y no se puede compartir la pantalla.",
+  "Automatic (off)": "Automático (desactivado)"
 }

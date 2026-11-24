@@ -89,7 +89,7 @@ def geography(res):
 
 
 def workspace(res):
-    return res.get("tenant") or ""
+    return res.get("workspace") or res.get("tenant") or ""
 
 
 def workspace_label(name):

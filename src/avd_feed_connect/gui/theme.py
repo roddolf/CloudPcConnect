@@ -86,6 +86,8 @@ headerbar.avd-header .titlebutton { color:@avd_muted; background:none; box-shado
   border-radius:${r}px; min-width:24px; min-height:24px; }
 headerbar.avd-header windowcontrols button:hover,
 headerbar.avd-header .titlebutton:hover { color:@avd_ink; background:alpha(@avd_ink,$hover); }
+headerbar.avd-header windowcontrols button image { background:none; box-shadow:none;
+  border-radius:0; padding:0; }
 .mark { min-width:24px; min-height:24px; border-radius:${r}px; color:@avd_accent;
   background:none; border:2px solid @avd_focus; }
 .brand-title { font-weight:bold; font-size:${fs_sub}px; color:@avd_ink; }
@@ -168,7 +170,7 @@ flowboxchild:focus-visible .tile { border-color:@avd_focus; box-shadow:inset 0 0
 .chipdot { min-width:6px; min-height:6px; border-radius:${r_dot}px; background:@avd_accent; }
 .chip-app .chipdot { background:@avd_warn; }
 .tile-sub { font-size:${fs_small}px; color:@avd_muted; }
-.tile-actions { margin-top:-4px; }
+.tile-chiprow { min-height:28px; }
 button.tile-action { min-width:26px; min-height:26px; padding:0; border-radius:${r}px;
   background:none; border:1px solid @avd_border; color:@avd_muted; box-shadow:none; }
 button.tile-action:hover { color:@avd_ink; border-color:alpha(@avd_ink,$hover_border);

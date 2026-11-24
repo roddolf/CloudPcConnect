@@ -42,6 +42,9 @@ SEC_VALUES = ["auto", "aad", "nla"]
 # resources (see _open_settings); desktops are unaffected.
 REMOTEAPP_LABELS = ["Automatic (app window)", "Full desktop"]
 REMOTEAPP_VALUES = ["auto", "desktop"]
+# Teams call optimization through the bundled freerdp-teams-redir add-in.
+TEAMS_LABELS = ["Automatic (audio and video)", "Audio and video", "Audio only", "Off"]
+TEAMS_VALUES = ["auto", "video", "audio", "off"]
 
 
 # User-Agent presented by the embedded sign-in webview. "auto" presents as

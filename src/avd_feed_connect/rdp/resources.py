@@ -9,6 +9,16 @@ from .. import config, http
 from ..i18n import _ as tr
 
 
+class RdpDownloadError(SystemExit):
+    def __init__(self, status, details):
+        self.status = status
+        if status == 401:
+            details = tr("The server rejected the request. Sign in again or refresh the workspace list.")
+        message = details[:300] or tr("The server did not provide an error message.")
+        super().__init__(tr("RDP download failed ({status}): {details}").format(
+            status=status, details=message))
+
+
 def download_rdp(token, res, output_dir=None):
     """Fetch resource ``res``'s .rdp text and write it under the feed data dir,
     returning the path. ``res`` is a resource dict from the feed."""
@@ -16,7 +26,7 @@ def download_rdp(token, res, output_dir=None):
         sys.exit(tr("Resource {resource} has no ResourceFile URL").format(resource=repr(res["title"])))
     st, _, rdp = http.get(res["rdp_url"], token)
     if st != 200:
-        sys.exit(tr("RDP download failed ({status}): {details}").format(status=st, details=rdp[:300]))
+        raise RdpDownloadError(st, rdp)
     directory = output_dir or config.OUT
     os.makedirs(directory, mode=0o700, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", res["title"])[:80]

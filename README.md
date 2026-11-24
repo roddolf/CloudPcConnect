@@ -290,10 +290,9 @@ The app-wide `settings.json` has these keys:
 | `_theme`, `_language` | Appearance and language |
 | `_browser_signin` | Sign in with the system browser |
 | `_close_to_tray`, `_start_in_tray` | Tray behavior |
-| `_teams_redir`, `_teams_redir_camera` | Teams call optimization |
 
 Each account's `settings.json` maps a resource ID to its settings, including
-`hypr_workspace`, `launcher_icon` and `launcher_id`.
+`teams`, `hypr_workspace`, `launcher_icon` and `launcher_id`.
 
 The JSON files hold no secrets. Refresh tokens are in the login keyring.
 To back up, copy the `avd-feed-connect` directory. Leave out `webview/` if
@@ -347,15 +346,24 @@ Teams chat and files work in any session. Without optimization, Teams runs
 call media on the session host, which needs outbound UDP 3478 to 3481 to the
 Teams relays.
 
-Turn on **Optimize Teams calls** in the settings menu to run call media on the
-local microphone, speakers and camera through
-[freerdp-teams-redir](https://github.com/vchegwidden/freerdp-teams-redir).
-After connecting, restart Teams in the session once, and calls show "AVD media
-optimized". Audio is stable. Video is an extra, experimental option: your
-video opens in a separate window, screen sharing does not work, and a crash in
-the add-in ends the session.
+Teams call optimization is on by default. Call audio and video run on the
+local microphone, speakers and camera through the bundled
+[freerdp-teams-redir](https://github.com/vchegwidden/freerdp-teams-redir)
+add-in. After the first connection, restart Teams in the session once; calls
+then show "AVD media optimized".
+
+Change it under **Teams calls** in Default settings, or per resource in its own
+settings: Audio and video, Audio only, or Off. Video opens in a separate
+window and screen sharing is not supported. The add-in is unofficial, and a
+crash in it ends the session, so pick Audio only or Off if calls drop the
+connection.
 
 ## Troubleshooting
+
+**A session stops taking keyboard and mouse input on NVIDIA.** NVIDIA's GL
+driver can stall under XWayland while the window is on a hidden workspace. On
+NVIDIA the app renders sessions with Vulkan and without vsync to avoid this.
+Set `SDL_RENDER_DRIVER` yourself to choose another renderer.
 
 **"Certificate changed" when connecting.** Pooled host pools can present a
 different certificate on each host. Set **Server certificate** to Don't verify

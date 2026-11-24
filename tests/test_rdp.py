@@ -241,6 +241,23 @@ def test_account_downloads_keep_same_title_resources_separate(tmp_path, monkeypa
     assert open(c).read() == 'username:s:c'
 
 
+def test_rdp_download_error_exposes_status_and_message(monkeypatch):
+    import pytest
+    from avd_feed_connect.rdp.resources import RdpDownloadError, download_rdp
+
+    monkeypatch.setattr(
+        "avd_feed_connect.rdp.resources.http.get",
+        lambda *_: (401, {}, ""),
+    )
+    with pytest.raises(RdpDownloadError) as caught:
+        download_rdp("token", {
+            "id": "one", "title": "Desktop",
+            "rdp_url": "https://example.microsoft.com/one",
+        })
+    assert caught.value.status == 401
+    assert "401" in str(caught.value)
+
+
 def test_cli_repeated_connections_preserve_each_log(tmp_path, monkeypatch):
     from avd_feed_connect import config
     from avd_feed_connect.rdp.launcher import RdpLauncher

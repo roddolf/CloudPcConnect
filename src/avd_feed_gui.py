@@ -86,7 +86,7 @@ from avd_feed_connect.gui.workspaces import HyprlandWorkspaceBackend, valid_work
 from avd_feed_connect.gui import resource_groups  # noqa: E402
 from avd_feed_connect.gui import launchers, omarchy as omarchy_theme  # noqa: E402
 from avd_feed_connect.rdp.security import resolve_security  # noqa: E402
-from avd_feed_connect.rdp.resources import local_resource  # noqa: E402
+from avd_feed_connect.rdp.resources import local_resource, RdpDownloadError  # noqa: E402
 from avd_feed_connect.rdp.attempt import ConnectionAttempt  # noqa: E402
 from avd_feed_connect.rdp.launcher import (  # noqa: E402
     build_display_args, disable_client_hotkeys, private_argument_file, session_log_path,
@@ -812,47 +812,6 @@ class AvdApp(Gtk.Application):
             self._tray_toggles.append(cb)
         pbox.append(Gtk.Separator())
 
-        # Teams call optimization (beta): runs Teams call media on the local
-        # machine via the freerdp-teams-redir add-in. Inert on the stock client
-        # (the add-in is not bundled), so the row is insensitive without it.
-        teamsh = create(Gtk.Label, label=tr("TEAMS CALLS (BETA)"), xalign=0)
-        teamsh.add_css_class("menu-head")
-        teamsh.set_margin_start(4); teamsh.set_margin_top(2)
-        pbox.append(teamsh)
-        teams_ok = self._teams_plugin_available()
-        beta_cb = create(Gtk.CheckButton, label=tr("Optimize Teams calls"))
-        beta_cb.set_active(bool(self._settings.get("_teams_redir")))
-        beta_cb.set_sensitive(teams_ok)
-        cam_cb = create(Gtk.CheckButton, label=tr("Experimental camera and video"))
-        cam_cb.set_active(bool(self._settings.get("_teams_redir_camera")))
-        cam_cb.set_margin_start(18)
-        cam_cb.set_sensitive(teams_ok and bool(self._settings.get("_teams_redir")))
-        if not teams_ok:
-            for cb in (beta_cb, cam_cb):
-                bind(cb, 'tooltip_text',
-                     tr("Needs a FreeRDP build with the Teams add-in"))
-
-        def _on_teams_beta(btn):
-            self._set_flag("_teams_redir", btn.get_active())
-            cam_cb.set_sensitive(teams_ok and btn.get_active())
-        beta_cb.connect("toggled", _on_teams_beta)
-        cam_cb.connect("toggled",
-                       lambda btn: self._set_flag("_teams_redir_camera", btn.get_active()))
-        pbox.append(beta_cb); pbox.append(cam_cb)
-        teams_note = create(Gtk.Label, xalign=0, wrap=True, label=tr(
-            "Optimized calls carry audio only unless camera and video is on, "
-            "because Teams then takes its camera from here. Other apps keep "
-            "using the redirected camera as usual."))
-        teams_note.add_css_class("tile-sub")
-        teams_note.set_margin_start(4)
-        # The popover has no fixed width, so it grows to a child's natural
-        # width; without a cap this one-line note stretches it across the
-        # screen. Bound the natural width so the note wraps instead (same as
-        # the wrapping headers elsewhere).
-        teams_note.set_max_width_chars(40)
-        pbox.append(teams_note)
-        pbox.append(Gtk.Separator())
-
         setbtn = create(Gtk.Button, label=tr("Default settings…")); setbtn.add_css_class("flat")
         setbtn.connect("clicked", lambda *_: (settings_pop.popdown(), self._open_settings(None)))
         pbox.append(setbtn)
@@ -1459,6 +1418,44 @@ class AvdApp(Gtk.Application):
             if session.token and time.monotonic() < session.deadline - 120:
                 return True
         return self._do_refresh(True, session)
+
+    def _download_resource_rdp(self, child, res, session, windowed, attempt):
+        try:
+            return session.client.download_rdp(session.token, res)
+        except RdpDownloadError as error:
+            if error.status != 401 or session.local:
+                raise
+
+        # A token can be revoked before its advertised expiry. Force one silent
+        # refresh, then retry. If the feed's ResourceFile URL is stale too, fetch
+        # the feed once and retry with its current URL.
+        with session.refresh_lock:
+            session.token = None
+            session.deadline = 0.0
+        if not self._ensure_token(session):
+            if attempt.is_current():
+                child._launching = False
+            self._set_connecting(res["id"], res["title"], False, session, attempt=attempt)
+            self._set_tile_state(res["id"], None, session, attempt=attempt)
+            self._set_status(tr("Sign in to connect"), session, attempt=attempt)
+            session.pending_launch = (res["id"], windowed)
+            GLib.idle_add(lambda: self._interactive_signin(session) if attempt.active() else False)
+            return None
+
+        try:
+            return session.client.download_rdp(session.token, res)
+        except RdpDownloadError as error:
+            if error.status != 401:
+                raise
+
+        refreshed = session.client.enumerate_feed(session.token)
+        if not session.save_resources(refreshed):
+            raise RdpDownloadError(401, tr("The account was signed out during the download."))
+        current = next((item for item in refreshed if item.get("id") == res["id"]), None)
+        if current is None or not current.get("rdp_url"):
+            raise RdpDownloadError(401, tr("Refresh the workspace list and try again."))
+        child._res = current
+        return session.client.download_rdp(session.token, current)
 
     def _refresh_failed_status(self, session):
         err = session.client.last_refresh_error
@@ -2488,15 +2485,21 @@ class AvdApp(Gtk.Application):
         clabel = create(Gtk.Label, label=tr("DESKTOP") if is_desktop else tr("REMOTE APP"))
         clabel.add_css_class("chiplabel")
         chip.append(dot); chip.append(clabel)
-        meta.append(title); meta.append(chip)
+        chip.set_valign(Gtk.Align.CENTER)
 
-        tile.append(top); tile.append(meta)
-
-        # Session actions, shown while the session is connected.
+        # Session actions sit on the chip row, which keeps a fixed height so
+        # the tile layout doesn't shift when a session connects.
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         actions.add_css_class("tile-actions")
+        actions.set_halign(Gtk.Align.END); actions.set_hexpand(True)
+        actions.set_valign(Gtk.Align.CENTER)
         actions.set_visible(False)
-        tile.append(actions)
+        chiprow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        chiprow.add_css_class("tile-chiprow")
+        chiprow.append(chip); chiprow.append(actions)
+        meta.append(title); meta.append(chiprow)
+
+        tile.append(top); tile.append(meta)
 
         child = Gtk.FlowBoxChild()
         child.set_child(tile)
@@ -2730,8 +2733,10 @@ class AvdApp(Gtk.Application):
                         child._launching = False
                     return
                 path = (self._prepare_local_rdp(res) if session.local
-                        else session.client.download_rdp(session.token, res))
+                        else self._download_resource_rdp(child, res, session, windowed, attempt))
                 if not attempt.active():
+                    return
+                if path is None:
                     return
         except (SystemExit, Exception) as e:  # never let a write/HTTP error hang the tile
             if not attempt.active():
@@ -2768,6 +2773,12 @@ class AvdApp(Gtk.Application):
         # keep this set for the child in case any bundled component initializes
         # WebKitGTK — the DMABUF/GBM path blanks on some GPUs. Harmless otherwise.
         env["WEBKIT_DISABLE_DMABUF_RENDERER"] = "1"
+        # NVIDIA's GLX driver on XWayland can block forever in an explicit-sync
+        # wait while the window is on a hidden workspace, freezing the session's
+        # keyboard and mouse. SDL's Vulkan renderer without vsync doesn't stall.
+        if os.path.exists("/proc/driver/nvidia/version"):
+            env.setdefault("SDL_RENDER_DRIVER", "vulkan")
+            env.setdefault("SDL_RENDER_VSYNC", "0")
         # Reduce tearing in the SDL3 client (vsync + double buffer). SDL hints,
         # ignored where unsupported, so always safe.
         env.setdefault("SDL_RENDER_VSYNC", "1")
@@ -2775,24 +2786,20 @@ class AvdApp(Gtk.Application):
         if config.SDL_LIBS and os.path.isdir(config.SDL_LIBS):
             env["LD_LIBRARY_PATH"] = config.SDL_LIBS + (
                 os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
-        # Teams call optimization (beta): load the freerdp-teams-redir add-in so
-        # Teams call media runs on the LOCAL mic/speakers (and, experimentally,
-        # camera) via libwebrtc instead of the session host. Opt-in, and only
-        # when a FreeRDP carrying the add-in is in use (the bundled client has
-        # none, so this is inert there). The /dvc flag is appended to argv below.
-        teams_redir = bool(self._settings.get("_teams_redir")) \
-            and self._teams_plugin_available()
+        # Teams call optimization: the bundled freerdp-teams-redir add-in runs
+        # Teams call media on the local mic, speakers and camera instead of the
+        # session host. On (audio and video) unless the settings turn it down.
+        teams_mode = self._eff_teams(res, session)
+        teams_redir = teams_mode != "off"
         if teams_redir:
             # Never write transcripts: they hold TURN creds / ICE passwords.
             env["TEAMS_REDIR_TRANSCRIPTS"] = "off"
-            if self._settings.get("_teams_redir_camera"):
-                # Experimental video: hold a closed video window a little longer
-                # to smooth Teams' frequent open/close churn. VAAPI stays off
-                # (the Intel HW encoder crashes the client).
+            if teams_mode == "video":
+                # Hold a closed video window a little longer to smooth Teams'
+                # frequent open/close churn. VAAPI stays off (the Intel HW
+                # encoder crashes the client).
                 env.setdefault("TEAMS_REDIR_VIDEO_KEEP_MS", "8000")
             else:
-                # Audio-optimized only (stable): no camera encode, no separate
-                # video windows, no renegotiation churn, far lower power draw.
                 env["TEAMS_REDIR_VIDEO"] = "off"
         safe = _re.sub(r"[^A-Za-z0-9]+", "_", res["title"])[:40]
         logpath = session_log_path(
@@ -3583,14 +3590,6 @@ class AvdApp(Gtk.Application):
             self._settings.pop(key, None)
         storage.save_settings(self._settings)
 
-    def _set_flag(self, key, on):
-        """Persist an app-wide boolean setting (present=on, absent=off)."""
-        if on:
-            self._settings[key] = True
-        else:
-            self._settings.pop(key, None)
-        storage.save_settings(self._settings)
-
     def _teams_plugin_available(self):
         """True when the FreeRDP in use carries the freerdp-teams-redir add-in
         (libteams-redir-client.so in its lib/freerdp3). The add-in is not
@@ -3776,6 +3775,13 @@ class AvdApp(Gtk.Application):
                  session.resource_settings.get(res["id"], {}).get("extra_args", ""),
                  os.environ.get("AVD_EXTRA_ARGS", "")]
         return " ".join(p.strip() for p in parts if p and p.strip()).strip()
+
+    def _eff_teams(self, res, session):
+        """Teams call optimization for this resource: "video", "audio" or "off".
+        Automatic means audio and video, and needs the add-in in the client."""
+        if not self._teams_plugin_available():
+            return "off"
+        return self._eff("teams", res, session) or "video"
 
     SETTINGS_CONTROL_WIDTH = 260
 
@@ -3998,6 +4004,16 @@ class AvdApp(Gtk.Application):
                 tr("Full desktop opens the whole remote PC so you can launch the app yourself — use this if the app window never appears.")))
 
 
+        teams_dd = None
+        if self._teams_plugin_available():
+            teams_dd = create(Gtk.DropDown,
+                model=strings([tr(label) for label in storage.TEAMS_LABELS]))
+            tv = cur.get("teams", "auto")
+            teams_dd.set_selected(storage.TEAMS_VALUES.index(tv)
+                                  if tv in storage.TEAMS_VALUES else 0)
+            field(connection, tr("Teams calls"), teams_dd, help_text(
+                tr("Runs Teams call media on this computer. Restart Teams in the session once after the first connection. Video opens in its own window and screen sharing is not supported.")))
+
         hyprland = isinstance(workspace_backend(), HyprlandWorkspaceBackend)
 
         # Hyprland: a fixed workspace per Cloud PC, and where this window opens.
@@ -4125,6 +4141,10 @@ class AvdApp(Gtk.Application):
                     entry["user_agent"] = ua_entry.get_text().strip() or "auto"
                 else:
                     entry["user_agent"] = storage.UA_PRESETS[ua_sel]
+            if teams_dd is not None:
+                entry["teams"] = storage.TEAMS_VALUES[teams_dd.get_selected()]
+            elif "teams" in cur:
+                entry["teams"] = cur["teams"]
             if remoteapp_dd is not None:   # RemoteApp resources only
                 entry["remoteapp"] = storage.REMOTEAPP_VALUES[remoteapp_dd.get_selected()]
             if hypr_dd is not None:
@@ -4141,6 +4161,7 @@ class AvdApp(Gtk.Application):
                     and entry["cert"] == "auto" and entry["sec"] == "auto" \
                     and entry.get("user_agent", "auto") == "auto" \
                     and entry.get("remoteapp", "auto") == "auto" \
+                    and entry.get("teams", "auto") == "auto" \
                     and entry.get("hypr_workspace", "auto") == "auto" \
                     and not any(k in entry for k in ("launcher_icon", "launcher_id")) \
                     and not entry["extra_args"]:

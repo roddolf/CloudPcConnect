@@ -156,6 +156,20 @@ def test_resource_preferences_are_account_local(app):
     assert app._eff('scale', b.resources[0], b) == '125'
 
 
+def test_teams_optimization_defaults_to_video_with_overrides(app, monkeypatch):
+    a = add_saved(app, 'a', 'a@example.com')
+    res = a.resources[0]
+    monkeypatch.setattr(app, '_teams_plugin_available', lambda: True)
+    assert app._eff_teams(res, a) == 'video'
+    app._settings['_default'] = {'teams': 'audio'}
+    assert app._eff_teams(res, a) == 'audio'
+    a.resource_settings[res['id']] = {'teams': 'off'}
+    assert app._eff_teams(res, a) == 'off'
+    monkeypatch.setattr(app, '_teams_plugin_available', lambda: False)
+    a.resource_settings[res['id']] = {'teams': 'video'}
+    assert app._eff_teams(res, a) == 'off'
+
+
 def test_tray_connects_unselected_saved_account_without_switching(app, monkeypatch):
     a, b = add_saved(app, 'a', 'a@example.com'), add_saved(app, 'b', 'b@example.com')
     app._select_account(a.id)
@@ -1248,6 +1262,45 @@ def test_cancelled_launch_never_downloads_or_starts_client(app, monkeypatch):
     attempt=ConnectionAttempt();attempt.cancel()
     monkeypatch.setattr(app,'_ensure_token',lambda *_: pytest.fail('cancelled launch must not authenticate'))
     app._launch(child,res,False,owner,attempt)
+
+
+def test_rdp_download_401_refreshes_token_and_feed_url(app, monkeypatch):
+    from types import SimpleNamespace
+    from avd_feed_connect.rdp.resources import RdpDownloadError
+
+    owner = add_saved(app, 'reauth', 'test@example.test')
+    resource = dict(owner.resources[0], rdp_url='https://example.microsoft.com/old')
+    owner.resources = [resource]
+    owner.token = 'expired'
+    owner.deadline = 1
+    child = SimpleNamespace(_res=resource)
+    attempt = SimpleNamespace(active=lambda: True, is_current=lambda: True)
+    calls = []
+
+    def download(token, res):
+        calls.append((token, res['rdp_url']))
+        if len(calls) < 3:
+            raise RdpDownloadError(401, '')
+        return '/tmp/fresh.rdp'
+
+    fresh = dict(resource, rdp_url='https://example.microsoft.com/current')
+    monkeypatch.setattr(owner.client, 'download_rdp', download)
+    monkeypatch.setattr(owner.client, 'enumerate_feed', lambda token: [fresh])
+
+    def refresh(session):
+        session.token = 'fresh-token'
+        return True
+
+    monkeypatch.setattr(app, '_ensure_token', refresh)
+    path = app._download_resource_rdp(child, resource, owner, False, attempt)
+
+    assert path == '/tmp/fresh.rdp'
+    assert calls == [
+        ('expired', 'https://example.microsoft.com/old'),
+        ('fresh-token', 'https://example.microsoft.com/old'),
+        ('fresh-token', 'https://example.microsoft.com/current'),
+    ]
+    assert child._res['rdp_url'] == 'https://example.microsoft.com/current'
 
 
 def test_closing_connection_login_cancels_immediately(app, monkeypatch):

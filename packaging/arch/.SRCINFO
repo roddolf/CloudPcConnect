@@ -1,6 +1,6 @@
 pkgbase = cloud-pc-connect
 	pkgdesc = Windows 365 Cloud PC, Dev Box and Azure Virtual Desktop client for Omarchy
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/roddolf/CloudPcConnect
 	arch = x86_64
@@ -63,7 +63,7 @@ pkgbase = cloud-pc-connect
 	optdepends = xdg-desktop-portal-gtk: per-Cloud PC app launcher entries
 	options = !lto
 	options = !debug
-	source = cloud-pc-connect::git+https://github.com/roddolf/CloudPcConnect.git#tag=v0.1.0
+	source = cloud-pc-connect::git+https://github.com/roddolf/CloudPcConnect.git#tag=v0.1.1
 	source = SDL::git+https://github.com/libsdl-org/SDL.git#tag=release-3.2.30
 	source = SDL_ttf::git+https://github.com/libsdl-org/SDL_ttf.git#tag=release-3.2.2
 	source = FreeRDP::git+https://github.com/FreeRDP/FreeRDP.git#tag=3.32.2

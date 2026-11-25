@@ -108,7 +108,7 @@ from avd_feed_connect.gui.session import AccountSession  # noqa: E402
 
 APP_NAME = "Cloud PC Connect"
 HYPR_WORKSPACES = list(range(1, 11))
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 # LOCAL_PROFILE_ID (the synthetic account for user-opened .rdp files, issue #17)
 # is imported from avd_feed_connect.accounts, its single source of truth.
 

@@ -73,6 +73,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.1" date="2026-11-24">
+      <description>
+        <p>Launcher entries connect with a notification instead of opening the main window.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-24">
       <description>
         <p>First release of the Cloud PC Connect fork.</p>

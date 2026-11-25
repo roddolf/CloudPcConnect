@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloud-pc-connect"
-version = "0.1.0"
+version = "0.1.1"
 description = "Windows 365, Dev Box and Azure Virtual Desktop client for Omarchy"
 readme = "README.md"
 requires-python = ">=3.10"

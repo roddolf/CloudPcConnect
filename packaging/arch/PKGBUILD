@@ -18,7 +18,7 @@
 # LiveKit's prebuilt libwebrtc (~150 MB). Cargo crates are fetched in prepare().
 
 pkgname=cloud-pc-connect
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Windows 365 Cloud PC, Dev Box and Azure Virtual Desktop client for Omarchy'
 arch=('x86_64')

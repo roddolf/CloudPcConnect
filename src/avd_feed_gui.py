@@ -270,6 +270,8 @@ class AvdApp(Gtk.Application):
         self._tray = None             # TrayIcon, unless AVD_TRAY=0 or no session bus
         self._sessions = {}           # (account id, resource id) → connection state
         self._tray_toggles = []       # settings-menu tray options (need a tray host)
+        self._launch_quietly = False  # a launcher entry started the app: keep the window hidden
+        self._launch_notices = {}     # (account id, resource id) -> "Connecting" notification id
         self._start_hidden_source = 0  # timeout giving up on "start in the tray"
 
     def _set_language(self, preference):
@@ -305,19 +307,38 @@ class AvdApp(Gtk.Application):
             self.do_activate()
 
     def _connect_from_launcher(self, account_id, resource_id):
-        """Open a Cloud PC from its app launcher entry."""
-        self.do_activate()
+        """Open a Cloud PC from its app launcher entry. Only the session window
+        and a notification show; the main window stays as it was unless sign-in
+        or an error needs it."""
+        if self.win is None:
+            self._launch_quietly = True
+            self.do_activate()
+            self._launch_quietly = False
         session = self.accounts.get(account_id)
         if session is None or session.removed:
             self._error(tr("This launcher belongs to an account that is no longer signed in."))
             return
         if session is not self.current and self.view_mode != "all":
             self._select_account(account_id)
+        if self._sessions.get((session.id, resource_id)) != "connected":
+            self._notify_launch(session, resource_id)
         child = session.tiles.get(resource_id)
         if child is not None:
             self._on_tile_activated(None, child)
         else:
             session.pending_launch = (resource_id, False)
+
+    def _notify_launch(self, session, resource_id):
+        """A "Connecting" notification for a launch from outside the window,
+        withdrawn once the session connects or fails."""
+        res = next((r for r in session.resources or [] if r.get("id") == resource_id), None)
+        notice = Gio.Notification.new(tr("Connecting to {resource}…").format(
+            resource=res.get("name") if res else tr("Cloud PC")))
+        notice.set_icon(Gio.ThemedIcon.new(APP_ID))
+        notification_id = "launch-" + hashlib.sha256(
+            f"{session.id}/{resource_id}".encode()).hexdigest()[:16]
+        self._launch_notices[(session.id, resource_id)] = notification_id
+        self.send_notification(notification_id, notice)
 
     def _scheme_connect(self, session):
         """Whether this session's connection-time AAD should auto-capture via the
@@ -411,12 +432,13 @@ class AvdApp(Gtk.Application):
         start_hidden = bool(self._settings.get("_start_in_tray")
                             and not os.environ.get("AVD_DEMO")
                             and bool(self.current and self.current.resources))
-        if not start_hidden:
+        quiet = self._launch_quietly and bool(self.current and self.current.resources)
+        if not (start_hidden or quiet):
             self.win.present()
             self._place_main_window()
         self._detect_displays()
         self._start_tray()
-        if start_hidden:
+        if start_hidden and not quiet:
             if self._tray:
                 self._start_hidden_source = GLib.timeout_add_seconds(
                     3, self._start_hidden_timeout)
@@ -1373,6 +1395,8 @@ class AvdApp(Gtk.Application):
                 self._render_resources(session)
                 return False
             self.stack.set_visible_child_name(name)
+            if name == "signin":
+                self._show_window()
             # "Sign out" only makes sense once we're signed in (workspaces view)
             if self._signout_item is not None:
                 self._signout_item.set_sensitive(self.current is not None)
@@ -2559,6 +2583,8 @@ class AvdApp(Gtk.Application):
                 self._sessions[key] = css[len("state-"):]
             else:
                 self._sessions.pop(key, None)
+            if css != "state-connecting" and key in self._launch_notices:
+                self.withdraw_notification(self._launch_notices.pop(key))
             self._tray_refresh()
             ch = self._child_for(res_id, session)
             if not ch:

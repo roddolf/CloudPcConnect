@@ -64,7 +64,8 @@ Install the package from the
 [latest release](https://github.com/roddolf/CloudPcConnect/releases/latest):
 
 ```bash
-sudo pacman -U https://github.com/roddolf/CloudPcConnect/releases/download/v0.1.0/cloud-pc-connect-0.1.0-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/roddolf/CloudPcConnect/releases/download/v0.1.0/cloud-pc-connect-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U cloud-pc-connect-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
 To update, install the package from a newer release the same way.

@@ -198,6 +198,27 @@ def test_tray_connects_unselected_saved_account_without_switching(app, monkeypat
     assert app.current is a
 
 
+def test_launcher_connect_notifies_without_raising_the_window(app, monkeypatch):
+    a = add_saved(app, 'a', 'a@example.com')
+    app._select_account(a.id)
+    drain()
+    sent, withdrawn, activated = {}, [], []
+    monkeypatch.setattr(app, 'send_notification', lambda nid, notice: sent.update({nid: notice}))
+    monkeypatch.setattr(app, 'withdraw_notification', withdrawn.append)
+    monkeypatch.setattr(app.win, 'present', lambda: pytest.fail('main window raised'))
+    monkeypatch.setattr(app, '_on_tile_activated', lambda grid, child, windowed=False: activated.append(child))
+    app._connect_from_launcher(a.id, 'same')
+    assert len(activated) == 1 and len(sent) == 1
+    app._set_tile_state('same', 'state-connecting', a)
+    drain()
+    assert withdrawn == []
+    app._set_tile_state('same', 'state-connected', a)
+    drain()
+    assert withdrawn == list(sent)
+    app._connect_from_launcher(a.id, 'same')
+    assert len(sent) == 1
+
+
 def test_settings_popover_keeps_general_options_separate(app):
     options = labels(app._settings_pop.get_child())
     assert 'Default settings…' in options

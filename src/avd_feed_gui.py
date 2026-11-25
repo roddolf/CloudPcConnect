@@ -333,7 +333,7 @@ class AvdApp(Gtk.Application):
         withdrawn once the session connects or fails."""
         res = next((r for r in session.resources or [] if r.get("id") == resource_id), None)
         notice = Gio.Notification.new(tr("Connecting to {resource}…").format(
-            resource=res.get("name") if res else tr("Cloud PC")))
+            resource=(res or {}).get("title") or tr("Cloud PC")))
         notice.set_icon(Gio.ThemedIcon.new(APP_ID))
         notification_id = "launch-" + hashlib.sha256(
             f"{session.id}/{resource_id}".encode()).hexdigest()[:16]

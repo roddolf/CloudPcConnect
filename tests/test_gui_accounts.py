@@ -207,8 +207,12 @@ def test_launcher_connect_notifies_without_raising_the_window(app, monkeypatch):
     monkeypatch.setattr(app, 'withdraw_notification', withdrawn.append)
     monkeypatch.setattr(app.win, 'present', lambda: pytest.fail('main window raised'))
     monkeypatch.setattr(app, '_on_tile_activated', lambda grid, child, windowed=False: activated.append(child))
+    titles = []
+    new = gui.Gio.Notification.new
+    monkeypatch.setattr(gui.Gio.Notification, 'new', lambda title: titles.append(title) or new(title))
     app._connect_from_launcher(a.id, 'same')
     assert len(activated) == 1 and len(sent) == 1
+    assert titles == ['Connecting to a@example.com…']
     app._set_tile_state('same', 'state-connecting', a)
     drain()
     assert withdrawn == []

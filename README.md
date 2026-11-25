@@ -389,8 +389,15 @@ export AVD_SDL_FREERDP=/opt/cloud-pc-connect/bin/sdl-freerdp AVD_SDL_LIBS=
 python3 src/avd_feed_gui.py           # GUI
 python3 src/avdfeed.py list           # CLI: list resources
 python3 src/avdfeed.py connect 0      # CLI: connect to resource 0
-python -m pytest tests
 ```
+
+```bash
+tools/run-headless.sh -m pytest -q tests   # tests on a private display (needs python-pytest)
+tools/screenshots.sh                       # regenerate the README screenshots
+```
+
+Contributors and coding agents: see [AGENTS.md](AGENTS.md), and
+[docs/UPSTREAM.md](docs/UPSTREAM.md) before merging upstream changes.
 
 Without the package, build `sdl-freerdp` against SDL 3.2. Newer SDL releases
 report a 0×0 display and full screen fails. The app adds `~/opt/sdl3/lib`, or
